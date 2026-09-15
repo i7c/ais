@@ -3,7 +3,7 @@
 tracked session, so any running agent can be found again later in tmux.
 
     ais [ais flags] -- <harness> [harness args...]
-    ais select | ls | status | notify | prune | current
+    ais select | ls | status | notify | prune | current | restart | install
 
 Config lives at ~/.ais/config.toml, session state at ~/.ais/sessions.json.
 Sessions are tracked only inside tmux: ais refuses to start outside it, since a
@@ -27,6 +27,7 @@ import sys
 import time
 import tomllib
 import unicodedata
+import uuid
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -48,6 +49,15 @@ NOTIFY_KEEP = 20          # per session
 NOTIFY_MAX_AGE = 86400    # seconds; older entries are dropped on the next write
 NOTIFY_WINDOW = 60        # minutes counted as "recent" by ls/status/select
 NOTIFY_SOUND = "Glass"
+
+# A harness conversation can be replaced mid-session (claude's /clear starts a
+# fresh one in the same process), so the ids are a history, newest last.
+SESSION_ID_KEEP = 20
+
+# What "ais install" writes into ~/.claude/CLAUDE.md, between these markers, so
+# a later install replaces its own section and nothing else.
+CLAUDE_MD_BEGIN = "<!-- ais:begin -->"
+CLAUDE_MD_END = "<!-- ais:end -->"
 
 DEFAULT_CONFIG = '''\
 # ais configuration.
@@ -74,6 +84,17 @@ flags = []
 
 [harness.claude.env]
 # ANTHROPIC_LOG = "debug"
+
+# [harness.<name>.session] teaches ais how that harness names conversations, so
+# "ais restart" can pick one up where it left off. {id} is the conversation id:
+# ais mints it (see "id") for a new session and replays it for a restart.
+# Without this table a harness is still tracked, it just restarts fresh.
+#
+# [harness.claude.session]
+# id = "uuid4"                     # or "short" for ais's own id alphabet
+# new = ["--session-id", "{id}"]
+# resume = ["--resume", "{id}"]
+# conflicts = ["-c", "--continue", "--fork-session"]   # you typed it: ais keeps out
 
 # [harness."pi.dev"]
 # flags = []
@@ -144,7 +165,74 @@ def harness_settings(config: dict, harness: str) -> dict:
     if not all(isinstance(c, str) for c in command):
         die(f"config: command for {harness} must be a string or list of strings")
 
-    return {"flags": flags, "env": env, "command": list(command)}
+    return {
+        "flags": flags,
+        "env": env,
+        "command": list(command),
+        "session": session_settings(specific.get("session"), harness),
+    }
+
+
+def session_settings(table, harness: str) -> dict | None:
+    """Validate [harness.<name>.session]; None when the harness has no such table.
+
+    Both templates are optional on their own: a harness that can resume but not
+    be told its id up front still works, ais just has no id to give it until
+    the harness reports one.
+    """
+    if table is None:
+        return None
+    if not isinstance(table, dict):
+        die(f"config: [harness.{harness}.session] must be a table")
+
+    out = {}
+    for key in ("new", "resume", "conflicts"):
+        value = table.get(key) or []
+        if isinstance(value, str):
+            value = [value]
+        if not all(isinstance(v, str) for v in value):
+            die(f"config: session.{key} for {harness} must be a list of strings")
+        out[key] = list(value)
+
+    kind = table.get("id", "uuid4")
+    if kind not in ("uuid4", "short"):
+        die(f'config: session.id for {harness} must be "uuid4" or "short"')
+    out["id"] = kind
+
+    for key in ("new", "resume"):
+        if out[key] and not any("{id}" in part for part in out[key]):
+            die(f"config: session.{key} for {harness} must contain {{id}} somewhere")
+
+    # Asking for the same conversation twice, in two ways, is an argv error in
+    # every harness worth supporting — so ais stands down when you name one.
+    flags = {p for p in out["new"] + out["resume"] + out["conflicts"] if p.startswith("-")}
+    out["conflicts"] = sorted(flags)
+    return out
+
+
+def session_argv(template: list[str], sid: str) -> list[str]:
+    return [part.replace("{id}", sid) for part in template]
+
+
+def mint_session_id(kind: str) -> str:
+    if kind == "short":
+        return "".join(secrets.choice(ID_ALPHABET) for _ in range(ID_LENGTH))
+    return str(uuid.uuid4())
+
+
+def names_a_session(argv: list[str], conflicts: list[str]) -> str | None:
+    """The first session-naming flag the user typed themselves, if any.
+
+    Matches "--resume x" and "--resume=x" alike; anything after a bare "--" is
+    the harness's own business and is left alone.
+    """
+    for arg in argv:
+        if arg == "--":
+            break
+        head = arg.split("=", 1)[0]
+        if head in conflicts:
+            return head
+    return None
 
 
 def notify_settings() -> dict:
@@ -571,11 +659,22 @@ def cmd_run(args, harness_argv: list[str]):
 
     harness = harness_argv[0]
     settings = harness_settings(config, harness)
-    argv = settings["command"] + settings["flags"] + harness_argv[1:]
+    harness_args = harness_argv[1:]
 
-    exe = shutil.which(argv[0])
-    if not exe:
-        die(f"harness not found on PATH: {argv[0]}")
+    # Mint the conversation id here rather than discovering it later: known
+    # before the child exists, it lands in the record in the same write as
+    # everything else, and there is nothing to scrape afterwards.
+    sid, session_flags = None, []
+    conf = settings["session"]
+    if conf and conf["new"]:
+        typed = names_a_session(harness_args, conf["conflicts"])
+        if typed:
+            note(f"you passed {typed}; leaving the conversation id to {harness}")
+        else:
+            sid = mint_session_id(conf["id"])
+            session_flags = session_argv(conf["new"], sid)
+
+    argv = settings["command"] + settings["flags"] + session_flags + harness_args
 
     location = capture_tmux_location(pane)
     if location is None:
@@ -586,6 +685,8 @@ def cmd_run(args, harness_argv: list[str]):
         "description": args.description,
         "harness": harness,
         "command": argv,
+        "harness_args": harness_args,  # what restart replays, minus ais's own flags
+        "session_ids": [sid] if sid else [],
         "status": "active",
         "pid": None,  # filled in once the child exists
         "hostname": socket.gethostname(),
@@ -595,8 +696,21 @@ def cmd_run(args, harness_argv: list[str]):
         "ended_at": None,
         "exit_code": None,
     }
+    return launch(session, argv, settings, dry_run=args.dry_run)
 
-    if args.dry_run:
+
+def launch(session: dict, argv: list[str], settings: dict, dry_run: bool) -> int:
+    """Register the session, run argv to completion, record how it ended.
+
+    Shared by run and restart: everything that differs between them has already
+    been decided by the time we get here.
+    """
+    exe = shutil.which(argv[0])
+    if not exe:
+        die(f"harness not found on PATH: {argv[0]}")
+
+    harness = session["harness"]
+    if dry_run:
         session["id"] = new_id({s.get("id") for s in read_sessions()})
     else:
         def register(sessions):
@@ -608,23 +722,26 @@ def cmd_run(args, harness_argv: list[str]):
     env.update(settings["env"])
     env["AIS_SESSION"] = session["id"]
     env["AIS_HARNESS"] = harness
-    if args.description:
-        env["AIS_SESSION_DESCRIPTION"] = args.description
+    if session.get("description"):
+        env["AIS_SESSION_DESCRIPTION"] = session["description"]
 
-    if args.dry_run:
+    if dry_run:
         print("session:", session["id"], "(dry run, not recorded)")
         print("command:", shlex.join(argv))
         for key, value in sorted(settings["env"].items()):
             print(f"env:     {key}={value}")
         print(f"env:     AIS_SESSION={session['id']}")
         print(f"env:     AIS_HARNESS={harness}")
-        if args.description:
-            print(f"env:     AIS_SESSION_DESCRIPTION={args.description}")
+        if session.get("description"):
+            print(f"env:     AIS_SESSION_DESCRIPTION={session['description']}")
+        if session.get("session_ids"):
+            print(f"{harness}: {session['session_ids'][-1]}")
+        print("cwd:    ", tilde(session["cwd"]))
         print("tmux:   ", tmux_label(session))
         return 0
 
     try:
-        child = subprocess.Popen(argv, env=env, executable=exe)
+        child = subprocess.Popen(argv, env=env, executable=exe, cwd=session["cwd"])
     except OSError as exc:
         finish(session["id"], 126)
         die(f"could not start {argv[0]}: {exc}")
@@ -688,6 +805,270 @@ def finish(session_id: str, code: int):
                 s["ended_at"] = now_iso()
                 s["exit_code"] = code
     mutate_sessions(apply)
+
+
+# ---------------------------------------------------------------- harness sessions
+
+def harness_session_id(session: dict) -> str | None:
+    """The conversation the harness was last known to be in, or None."""
+    ids = session.get("session_ids")
+    return ids[-1] if isinstance(ids, list) and ids else None
+
+
+def remember_session_id(sid: str, conversation: str) -> bool:
+    """Append a conversation id to sid's history; False if sid is unknown."""
+    def apply(sessions):
+        target = next((s for s in sessions if s.get("id") == sid), None)
+        if target is None:
+            return False
+        ids = [i for i in (target.get("session_ids") or []) if isinstance(i, str)]
+        if ids and ids[-1] == conversation:
+            return True  # same conversation, nothing moved
+        ids.append(conversation)
+        target["session_ids"] = ids[-SESSION_ID_KEEP:]
+        return True
+
+    return mutate_sessions(apply)
+
+
+def ancestry() -> list[tuple[int, str]]:
+    """This process's ancestors as (pid, command name), nearest first.
+
+    Empty when ps cannot be read, which callers must treat as "unknown" rather
+    than as evidence of anything.
+    """
+    res = subprocess.run(
+        ["ps", "-Ao", "pid=,ppid=,comm="], capture_output=True, text=True
+    )
+    if res.returncode != 0:
+        return []
+    info = {}
+    for line in res.stdout.splitlines():
+        parts = line.split(maxsplit=2)
+        if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
+            info[int(parts[0])] = (int(parts[1]), Path(parts[2].strip()).name)
+
+    chain, pid, seen = [], os.getpid(), set()
+    while pid in info and pid not in seen:
+        seen.add(pid)
+        pid, _ = info[pid]
+        if pid <= 1:
+            break
+        chain.append((pid, info.get(pid, (0, ""))[1]))
+    return chain
+
+
+def speaks_for(session: dict) -> bool:
+    """True when this process belongs to session's own harness process.
+
+    AIS_SESSION is inherited by everything the harness spawns, including
+    another harness — a nested "claude -p" would otherwise report its own
+    throwaway conversation as the session's. So look up the ancestry for the
+    nearest harness process: if there is one and it is not the one ais started,
+    this is a nested run and it does not get to speak.
+
+    Unknowable counts as yes: on the host that started it, the overwhelmingly
+    common case is the genuine session, and silently recording nothing would be
+    the worse failure.
+    """
+    pid = session.get("pid")
+    chain = ancestry()
+    if not pid or not chain:
+        return True
+    names = {Path(session.get("harness", "")).name, Path((session.get("command") or [""])[0]).name}
+    names.discard("")
+    for ancestor_pid, comm in chain:
+        if ancestor_pid == pid:
+            return True
+        if comm in names:
+            return False  # a nearer harness than ours: nested
+    return False  # ais's harness process is nowhere above us
+
+
+def cmd_session_seen(args):
+    """Hidden: the harness telling ais which conversation it is in now.
+
+    Wired up as a SessionStart hook by "ais install", so it also fires on
+    /clear, /compact and resume — the moments where the id changes under a
+    process ais has no other way to ask.
+
+    Never fails loudly: a hook that errors is a hook that interrupts the work
+    it was supposed to quietly observe.
+    """
+    try:
+        return session_seen(args)
+    except SystemExit:
+        return 0
+    except Exception:  # noqa: BLE001 - see the docstring
+        return 0
+
+
+def session_seen(args) -> int:
+    conversation = args.id
+    if not conversation:
+        raw = ""
+        if not sys.stdin.isatty():
+            try:
+                raw = sys.stdin.read()
+            except OSError:
+                raw = ""
+        try:
+            conversation = (json.loads(raw or "{}") or {}).get("session_id")
+        except json.JSONDecodeError:
+            conversation = None
+    if not conversation:
+        # No payload to read: the harness still exports its own id, and a hook
+        # runs as its child. Only good for "which conversation am I in now",
+        # which is exactly the question.
+        for var in ("AIS_HARNESS_SESSION_ID", "CLAUDE_CODE_SESSION_ID"):
+            conversation = os.environ.get(var)
+            if conversation:
+                break
+    if not conversation:
+        return 0  # nothing to record; not this hook's business to complain
+
+    sid = os.environ.get("AIS_SESSION")
+    if not sid:
+        return 0  # a harness running outside ais
+
+    session = next((s for s in read_sessions() if s.get("id") == sid), None)
+    if session is None:
+        return 0
+
+    if session.get("hostname") != socket.gethostname() or not speaks_for(session):
+        return 0
+
+    if not remember_session_id(sid, conversation):
+        return 0
+    if args.verbose:
+        note(f"{sid}: {session.get('harness', 'harness')} session {conversation}")
+    return 0
+
+
+# ---------------------------------------------------------------- restart
+
+def pick_restartable(sessions: list[dict], wanted: str | None) -> dict:
+    """The session ais restart should revive, or die trying to choose."""
+    if wanted:
+        matches = [s for s in sessions if s.get("id", "").startswith(wanted)]
+        if not matches:
+            die(f"no session with id starting {wanted!r}")
+        if len(matches) > 1:
+            die(f"{wanted!r} matches {len(matches)} sessions")
+        return matches[0]
+
+    # No id: the last thing that died here, which is nearly always the session
+    # whose pane you are standing in.
+    here, host = os.getcwd(), socket.gethostname()
+    mine = [
+        s for s in sessions
+        if s.get("status") == "dead"
+        and s.get("cwd") == here
+        and s.get("hostname") == host
+    ]
+    if not mine:
+        die(f"no dead session recorded in {tilde(here)}; name one: {PROG} restart <id>")
+    mine.sort(key=lambda s: s.get("ended_at") or s.get("started_at") or "")
+    return mine[-1]
+
+
+def cmd_restart(args):
+    """Start a session's harness again, in this pane, where it left off.
+
+    A restart is its own session — new id, new pane, its own notifications —
+    linked back to the one it continues. What it inherits is the part that has
+    to stay put: the directory, the name (so the worktree still matches) and
+    the harness conversation.
+    """
+    config = load_config()
+    pane = require_tmux()
+
+    sessions = mutate_sessions(lambda ss: (reap(ss), ss)[1])
+    target = pick_restartable(sessions, args.id)
+    host = socket.gethostname()
+
+    if target.get("hostname") != host:
+        die(
+            f"session {target['id']} ran on {target.get('hostname', '?')}, not {host}; "
+            "its conversation lives on that machine"
+        )
+    if target.get("status") == "active" and process_alive(target.get("pid")):
+        die(f"session {target['id']} is still running — {PROG} select {target['id']}")
+    cwd = target.get("cwd") or ""
+    if not Path(cwd).is_dir():
+        die(f"{tilde(cwd) or 'its directory'} is gone; nothing to restart into")
+
+    harness = target.get("harness") or ""
+    settings = harness_settings(config, harness)
+    conf = settings["session"]
+    harness_args = target.get("harness_args")
+    if harness_args is None:
+        # Recorded before ais kept the raw args: recover them from the argv it
+        # did record, minus the parts ais put there itself.
+        harness_args = strip_known_flags(
+            (target.get("command") or [])[len(settings["command"]) + len(settings["flags"]):],
+            conf["conflicts"] if conf else [],
+        )
+
+    conversation = harness_session_id(target)
+    typed = names_a_session(harness_args, conf["conflicts"]) if conf else None
+    session_flags, ids = [], []
+
+    if typed:
+        note(f"session {target['id']} was started with {typed}; leaving it to {harness}")
+    elif not args.fresh and conversation and conf and conf["resume"]:
+        session_flags = session_argv(conf["resume"], conversation)
+        ids = [conversation]  # same conversation continues; the harness keeps the id
+    elif not args.fresh and conversation:
+        note(f"no session.resume configured for {harness}; starting a fresh conversation")
+    if not session_flags and conf and conf["new"]:
+        fresh = mint_session_id(conf["id"])
+        session_flags = session_argv(conf["new"], fresh)
+        ids = [fresh]
+
+    argv = settings["command"] + settings["flags"] + session_flags + list(harness_args)
+
+    location = capture_tmux_location(pane)
+    if location is None:
+        die(f"could not read the tmux location of pane {pane}")
+
+    session = {
+        "id": None,
+        "description": target.get("description"),
+        "slug": target.get("slug"),  # deliberately shared: same work, same worktree
+        "harness": harness,
+        "command": argv,
+        "harness_args": list(harness_args),
+        "session_ids": ids,
+        "restart_of": target["id"],
+        "status": "active",
+        "pid": None,
+        "hostname": host,
+        "cwd": cwd,
+        "tmux": location,
+        "started_at": now_iso(),
+        "ended_at": None,
+        "exit_code": None,
+    }
+
+    what = f"resuming {conversation}" if ids and ids == [conversation] else "fresh conversation"
+    note(f"restarting {target['id']} ({elide(describe(target), 48)}) — {what}")
+    return launch(session, argv, settings, dry_run=args.dry_run)
+
+
+def strip_known_flags(argv: list[str], flags: list[str]) -> list[str]:
+    """Drop session-naming flags and their values from a recorded argv."""
+    out, skip = [], False
+    for arg in argv:
+        if skip:
+            skip = False
+            continue
+        head = arg.split("=", 1)[0]
+        if head in flags:
+            skip = "=" not in arg
+            continue
+        out.append(arg)
+    return out
 
 
 # ---------------------------------------------------------------- name
@@ -899,7 +1280,10 @@ def cmd_preview(args):
         ("tmux", tmux_label(session)),
         ("pid", str(session.get("pid") or "-")),
         ("host", session.get("hostname", "?")),
+        (session.get("harness", "session"), harness_session_id(session) or "-"),
     ]
+    if session.get("restart_of"):
+        fields.append(("restart of", session["restart_of"]))
     desc = (session.get("description") or "").strip()
     if desc:
         print(desc)
@@ -1005,6 +1389,176 @@ def cmd_prune(args):
     return 0
 
 
+# ---------------------------------------------------------------- install
+
+CLAUDE_SESSION_CONFIG = '''
+# Added by "ais install --harness claude": how claude names conversations, so
+# "ais restart" can pick one up again.
+[harness.claude.session]
+id = "uuid4"
+new = ["--session-id", "{id}"]
+resume = ["--resume", "{id}"]
+conflicts = ["-c", "--continue", "--fork-session"]
+'''
+
+CLAUDE_MD_SECTION = '''\
+## Restarting a session
+
+ais records which claude conversation each session is in, so a session that
+died — crash, closed pane, machine restart — can be picked up where it stopped:
+
+```
+ais restart <id>     # by ais session id, from ~/.ais/sessions.json
+ais restart          # the last session that died in this directory
+ais restart <id> --fresh    # same command and directory, new conversation
+```
+
+The restart runs in the pane you type it in and takes over that pane, so start
+it where you want the session to live. It keeps the old session's directory and
+`ais name`, so the worktree still matches, and gets a new ais id of its own.
+
+NEVER run `ais restart` for a session that is still alive — `ais select <id>`
+jumps to it instead. And never restart one of my sessions without being asked:
+resuming a conversation puts an agent back to work.
+'''
+
+
+def claude_dir() -> Path:
+    return Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude"))
+
+
+def ais_command() -> str:
+    """How the hook should invoke ais: by name when PATH has it, else by path."""
+    found = shutil.which(PROG)
+    if found:
+        return PROG
+    return str(Path(__file__).resolve())
+
+
+def backup(path: Path, dry: bool) -> None:
+    if path.exists() and not dry:
+        shutil.copy2(path, path.with_name(path.name + ".ais.bak"))
+
+
+def report(action: str, path: Path, detail: str = "") -> None:
+    print(f"{action:>12}  {tilde(path)}{'  ' + detail if detail else ''}")
+
+
+def install_config(dry: bool) -> None:
+    """Teach ais's own config how claude names conversations."""
+    load_config()  # writes the starter config when there is none
+    text = CONFIG_PATH.read_text()
+    # The starter config ships the table commented out as documentation, so
+    # only a live one counts as already installed.
+    if re.search(r"^\s*\[harness\.claude\.session\]", text, re.MULTILINE):
+        report("unchanged", CONFIG_PATH, "[harness.claude.session] already set")
+        return
+    if dry:
+        report("would add", CONFIG_PATH, "[harness.claude.session]")
+        return
+    backup(CONFIG_PATH, dry)
+    CONFIG_PATH.write_text(text.rstrip("\n") + "\n" + CLAUDE_SESSION_CONFIG)
+    report("added", CONFIG_PATH, "[harness.claude.session]")
+
+
+def install_hook(dry: bool, force: bool) -> None:
+    """Wire SessionStart to "ais _session-seen" without disturbing the rest.
+
+    claude fires SessionStart on startup, resume, /clear and /compact — every
+    moment the conversation id can change — so this is what keeps the recorded
+    id from going stale under a running process.
+    """
+    path = claude_dir() / "settings.json"
+    try:
+        settings = json.loads(path.read_text()) if path.exists() else {}
+    except json.JSONDecodeError as exc:
+        die(f"{tilde(path)} is not valid JSON ({exc}); fix it before installing")
+    if not isinstance(settings, dict):
+        die(f"{tilde(path)} does not contain a JSON object")
+
+    command = f"{ais_command()} _session-seen"
+    hooks = settings.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        die(f"{tilde(path)}: \"hooks\" is not an object; fix it before installing")
+    starts = hooks.setdefault("SessionStart", [])
+    if not isinstance(starts, list):
+        die(f"{tilde(path)}: \"hooks.SessionStart\" is not an array")
+
+    mine = [
+        h for matcher in starts if isinstance(matcher, dict)
+        for h in (matcher.get("hooks") or []) if isinstance(h, dict)
+        and "_session-seen" in str(h.get("command", ""))
+    ]
+    if mine and not force:
+        stale = [h for h in mine if h.get("command") != command]
+        if stale:
+            report("check", path, f"SessionStart runs {stale[0].get('command')!r} (--force rewrites it)")
+        else:
+            report("unchanged", path, "SessionStart hook already installed")
+        return
+    if mine:
+        for hook in mine:
+            hook["command"] = command
+    else:
+        starts.append({"hooks": [{"type": "command", "command": command}]})
+
+    if dry:
+        report("would wire", path, f"SessionStart -> {command}")
+        return
+    backup(path, dry)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(settings, indent=2) + "\n")
+    os.replace(tmp, path)
+    report("wired", path, f"SessionStart -> {command}")
+
+
+def install_claude_md(dry: bool) -> None:
+    """Put the restart instructions in CLAUDE.md, inside ais's own markers."""
+    path = claude_dir() / "CLAUDE.md"
+    block = f"{CLAUDE_MD_BEGIN}\n{CLAUDE_MD_SECTION}{CLAUDE_MD_END}\n"
+    text = path.read_text() if path.exists() else ""
+
+    if CLAUDE_MD_BEGIN in text and CLAUDE_MD_END in text:
+        head, rest = text.split(CLAUDE_MD_BEGIN, 1)
+        _, tail = rest.split(CLAUDE_MD_END, 1)
+        updated = head + block + tail.lstrip("\n")
+        action = "unchanged" if updated == text else "replaced"
+    else:
+        updated = (text.rstrip("\n") + "\n\n" if text.strip() else "") + block
+        action = "appended"
+
+    if action == "unchanged":
+        report("unchanged", path, "ais section already current")
+        return
+    if dry:
+        report("would append" if action == "appended" else "would replace", path, "ais section")
+        return
+    backup(path, dry)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(updated)
+    report(action, path, f"ais section ({CLAUDE_MD_BEGIN} … {CLAUDE_MD_END})")
+
+
+def cmd_install(args):
+    """Wire a harness up for session tracking and restart."""
+    if args.harness != "claude":
+        die(f"{PROG} install only knows how to wire up claude so far")
+    if not shutil.which(args.harness):
+        note(f"{args.harness} is not on PATH; installing the configuration anyway")
+
+    install_config(args.dry_run)
+    install_hook(args.dry_run, args.force)
+    install_claude_md(args.dry_run)
+
+    if not args.dry_run:
+        print()
+        sys.stdout.flush()  # keep the note under the report, not above it
+        note("new claude sessions will record their conversation id; "
+             "existing ones pick it up at the next /clear, /compact or restart")
+    return 0
+
+
 def cmd_current(args):
     sid = os.environ.get("AIS_SESSION")
     if not sid:
@@ -1044,6 +1598,15 @@ commands:
   name [--set N]   print this session's base name, for worktrees and branches;
                    derived from the description once, then stable for the
                    session's whole life. --set overrides it.
+  restart [id]     run a dead session's harness again in this pane, resuming
+                   its conversation; with no id, the last one that died here.
+                   Keeps its directory and name, gets a new ais id.
+                   --fresh starts a new conversation, -n/--dry-run shows the
+                   command without running it.
+  install          wire a harness up for restart: session flags in config.toml,
+                   a SessionStart hook in ~/.claude/settings.json and a section
+                   in ~/.claude/CLAUDE.md. --harness NAME (default claude),
+                   -n/--dry-run, --force to rewrite an existing hook.
   prune [--all]    drop dead sessions older than --days (default 7)
 
 files:
@@ -1085,7 +1648,8 @@ def main(argv: list[str]) -> int:
         return 0
 
     commands = (
-        "select", "ls", "status", "notify", "prune", "current", "name", "_preview"
+        "select", "ls", "status", "notify", "prune", "current", "name",
+        "restart", "install", "_preview", "_session-seen",
     )
     if ais_args[0] not in commands:
         hint = f"; to run a harness, separate it with '--': {PROG} -- {shlex.join(ais_args)}"
@@ -1129,9 +1693,26 @@ def main(argv: list[str]) -> int:
     p_name.add_argument("--set", default=None, metavar="NAME")
     p_name.set_defaults(fn=cmd_name)
 
+    p_restart = subs.add_parser("restart", add_help=False)
+    p_restart.add_argument("id", nargs="?", default=None)
+    p_restart.add_argument("--fresh", action="store_true")
+    p_restart.add_argument("-n", "--dry-run", action="store_true")
+    p_restart.set_defaults(fn=cmd_restart)
+
+    p_install = subs.add_parser("install", add_help=False)
+    p_install.add_argument("--harness", default="claude")
+    p_install.add_argument("-n", "--dry-run", action="store_true")
+    p_install.add_argument("--force", action="store_true")
+    p_install.set_defaults(fn=cmd_install)
+
     p_preview = subs.add_parser("_preview", add_help=False)
     p_preview.add_argument("id")
     p_preview.set_defaults(fn=cmd_preview)
+
+    p_seen = subs.add_parser("_session-seen", add_help=False)
+    p_seen.add_argument("id", nargs="?", default=None)
+    p_seen.add_argument("-v", "--verbose", action="store_true")
+    p_seen.set_defaults(fn=cmd_session_seen)
 
     try:
         args = parser.parse_args(ais_args)
