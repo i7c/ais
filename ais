@@ -54,8 +54,9 @@ NOTIFY_SOUND = "Glass"
 # fresh one in the same process), so the ids are a history, newest last.
 SESSION_ID_KEEP = 20
 
-# What "ais install" writes into ~/.claude/CLAUDE.md, between these markers, so
-# a later install replaces its own section and nothing else.
+# What "ais install" writes into ~/.claude/CLAUDE.md — how an agent running
+# inside a session is meant to use ais — between these markers, so a later
+# install replaces its own section and nothing else.
 CLAUDE_MD_BEGIN = "<!-- ais:begin -->"
 CLAUDE_MD_END = "<!-- ais:end -->"
 
@@ -1469,24 +1470,82 @@ conflicts = ["-c", "--continue", "--fork-session"]
 '''
 
 CLAUDE_MD_SECTION = '''\
-## Restarting a session
+## Notifications
 
-ais records which claude conversation each session is in, so a session that
-died — crash, closed pane, machine restart — can be picked up where it stopped:
+`ais notify` is how you get my attention. Use it instead of the built-in
+notification tool, which suppresses itself whenever tmux/the terminal looks
+active — which for me is always:
 
 ```
-ais restart <id>     # by ais session id, from ~/.ais/sessions.json
-ais restart          # the last session that died in this directory
-ais restart <id> --fresh    # same command and directory, new conversation
+ais notify "the deps sweep finished; 3 tests still failing"
 ```
 
-The restart runs in the pane you type it in and takes over that pane, so start
-it where you want the session to live. It keeps the old session's directory and
-`ais name`, so the worktree still matches, and gets a new ais id of its own.
+ALWAYS send one when you stop needing to do work and start needing me:
 
-NEVER run `ais restart` for a session that is still alive — `ais select <id>`
-jumps to it instead. And never restart one of my sessions without being asked:
-resuming a conversation puts an agent back to work.
+- you are asking a question and cannot proceed until I answer
+- you hit a permission prompt, a login, or anything else only I can do
+- a long-running job/task finished, whether it passed or failed
+- you are done with the task and handing it back
+
+One notification per stop, at the moment you stop — not before, not batched up
+later. Say what happened and what you need, in one line, not "task complete".
+
+Do not manage the details yourself:
+
+- No `osascript`. `ais notify` picks the backend for the platform.
+- No session tag in the message. It titles the banner with the session
+  description, so I can tell parallel sessions apart already.
+- No checking whether I am looking. It skips the banner when this session's own
+  tmux pane is the one on screen, and records the notification either way. Pass
+  `-f` only if I must see the banner regardless.
+
+Outside an ais session it still notifies, just without a session tag, so calling
+it unconditionally is safe.
+
+I read them back with `ais status`, and sessions that notified recently sort to
+the top of `ais select`.
+
+## AI sessions (ais)
+
+`ais` (`ais --help`) starts an agent harness with the right flags and env,
+records the run in `~/.ais/sessions.json`, and can jump back to its tmux pane
+later. When `$AIS_SESSION` is set you are running inside one:
+
+- `$AIS_SESSION` — the 10-char ais id, e.g. `vw86nyuhe6`
+- `$AIS_SESSION_DESCRIPTION` — what I said the session is for (may be unset)
+- `$AIS_HARNESS` — the harness name, normally `claude`
+
+Use these opportunistically, never require them: outside ais they are all unset
+and every rule here just falls back to asking me.
+
+`ais name` prints the session's base name — use it for worktrees, branches, and
+anything else that needs to identify this work:
+
+```
+ais name            # -> build-cli-tool-stock   (empty + exit 1 outside ais)
+ais name --set foo  # only when I ask for a different name
+```
+
+Do not derive that name yourself. ais derives it from the description once and
+remembers it, so it stays the same across repos and however often you ask; a
+name you invent per call would not. If I ask for a different name, set it with
+`--set` rather than just using it, so the next call agrees with you.
+
+Interacting with ais:
+
+- `ais ls`, `ais ls -a`, `ais status`, `ais current` and `ais name` are
+  read-only as far as my work is concerned. Run them freely when I ask what is
+  running or which session is which.
+- NEVER run `ais select`. It switches my tmux client to another session's pane,
+  yanking my view away from wherever I am. That command is mine.
+- NEVER start a session yourself — no `ais -- claude` (that nests a harness
+  inside this one) and no launching an agent harness directly.
+- NEVER run `ais restart`. It takes over the pane it runs in and puts another
+  agent back to work; deciding that is mine.
+- `~/.ais/sessions.json` belongs to ais, which locks it while writing. Never
+  hand-edit it, and never clean up your own session entry: ais marks the session
+  dead with its exit code when you terminate. `~/.ais/config.toml` is fine to
+  edit when I ask.
 '''
 
 
@@ -1581,7 +1640,7 @@ def install_hook(dry: bool, force: bool) -> None:
 
 
 def install_claude_md(dry: bool) -> None:
-    """Put the restart instructions in CLAUDE.md, inside ais's own markers."""
+    """Put the house rules for a session in CLAUDE.md, inside ais's markers."""
     path = claude_dir() / "CLAUDE.md"
     block = f"{CLAUDE_MD_BEGIN}\n{CLAUDE_MD_SECTION}{CLAUDE_MD_END}\n"
     text = path.read_text() if path.exists() else ""
@@ -1672,9 +1731,10 @@ commands:
                    Keeps its directory and name, gets a new ais id.
                    --fresh starts a new conversation, -n/--dry-run shows the
                    command without running it.
-  install          wire a harness up for restart: session flags in config.toml,
-                   a SessionStart hook in ~/.claude/settings.json and a section
-                   in ~/.claude/CLAUDE.md. --harness NAME (default claude),
+  install          wire a harness up: session flags in config.toml for restart,
+                   a SessionStart hook in ~/.claude/settings.json, and a section
+                   in ~/.claude/CLAUDE.md telling the agent how to use ais from
+                   inside a session. --harness NAME (default claude),
                    -n/--dry-run, --force to rewrite an existing hook.
   prune [--all]    drop dead sessions older than --days (default 7)
 
