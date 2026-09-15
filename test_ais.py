@@ -237,6 +237,98 @@ class HereMarker(unittest.TestCase):
         self.assertIsNone(ais.session_at_pane(None, self.sessions))
 
 
+class WindowName(unittest.TestCase):
+    """A session names its window, and leaves the window as it found it.
+
+    The restore is the part worth pinning: automatic-rename has to go back to
+    what the window had, and "nothing at all" is a value tmux only accepts as
+    an unset, not as the value the window was inheriting.
+    """
+
+    def setUp(self):
+        self.real_tmux = ais.tmux
+        self.calls = []
+        self.auto = ""      # what show-window-options reports: unset
+        self.name = "zsh"   # the window name before we touch it
+        self.fails = None   # a command that refuses, for the failure cases
+        ais.tmux = self.fake_tmux
+
+    def tearDown(self):
+        ais.tmux = self.real_tmux
+
+    def fake_tmux(self, *args, check=False):
+        argv = list(args)
+        self.calls.append(argv)
+        if argv[0] == self.fails:
+            return subprocess.CompletedProcess(argv, 1, "", "no")
+        out = ""
+        if argv[0] == "display-message":
+            out = self.name + "\n"
+        elif argv[0] == "show-window-options":
+            out = (self.auto + "\n") if self.auto else ""
+        return subprocess.CompletedProcess(argv, 0, out, "")
+
+    def run_named(self, name="fix-the-auth-bug"):
+        with ais.window_named("%3", name) as renamed:
+            self.calls.append(["<running>"])
+        return renamed
+
+    def test_names_the_window_and_holds_it(self):
+        self.assertTrue(self.run_named())
+        self.assertIn(["set-window-option", "-t", "%3", "automatic-rename", "off"], self.calls)
+        self.assertIn(["rename-window", "-t", "%3", "fix-the-auth-bug"], self.calls)
+
+    def test_puts_the_old_name_back_afterwards(self):
+        self.run_named()
+        after = self.calls[self.calls.index(["<running>"]):]
+        self.assertIn(["rename-window", "-t", "%3", "zsh"], after)
+        self.assertIn(["set-window-option", "-u", "-t", "%3", "automatic-rename"], after)
+
+    def test_an_option_the_window_had_is_restored_as_it_was(self):
+        self.auto = "on"
+        self.run_named()
+        self.assertIn(
+            ["set-window-option", "-t", "%3", "automatic-rename", "on"], self.calls
+        )
+        self.assertNotIn(["set-window-option", "-u", "-t", "%3", "automatic-rename"], self.calls)
+
+    def test_a_window_that_refuses_is_left_alone(self):
+        # the pane went away mid-start: nothing was renamed, so nothing is undone
+        self.fails = "rename-window"
+        self.assertFalse(self.run_named())
+        after = self.calls[self.calls.index(["<running>"]):]
+        self.assertEqual(after, [["<running>"]])
+
+    def test_restores_even_when_the_session_blows_up(self):
+        with self.assertRaises(SystemExit):
+            with ais.window_named("%3", "boom"):
+                raise SystemExit(1)
+        self.assertIn(["rename-window", "-t", "%3", "zsh"], self.calls[3:])
+
+    def test_the_session_name_is_the_window_name(self):
+        self.assertEqual(ais.window_name({"slug": "auth-bug", "harness": "claude"}), "auth-bug")
+
+    def test_a_description_names_it_before_a_slug_exists(self):
+        self.assertEqual(
+            ais.window_name({"description": "fix the auth bug", "harness": "claude"}),
+            "fix-auth-bug",
+        )
+
+    def test_a_nameless_session_falls_back_to_the_harness(self):
+        self.assertEqual(ais.window_name({"harness": "claude"}), "claude")
+
+
+class RenameSetting(unittest.TestCase):
+    def test_renaming_is_on_unless_turned_off(self):
+        self.assertTrue(ais.rename_window_setting({}))
+        self.assertTrue(ais.rename_window_setting({"tmux": {}}))
+        self.assertFalse(ais.rename_window_setting({"tmux": {"rename": False}}))
+
+    def test_a_non_boolean_is_refused(self):
+        with self.assertRaises(SystemExit):
+            ais.rename_window_setting({"tmux": {"rename": "off"}})
+
+
 class ClaudeMdBlock(unittest.TestCase):
     """install must own its own section and nothing else in the file."""
 
