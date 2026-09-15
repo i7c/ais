@@ -28,7 +28,7 @@ import time
 import tomllib
 import unicodedata
 import uuid
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime
 from pathlib import Path
 
@@ -99,6 +99,12 @@ flags = []
 
 # [harness."pi.dev"]
 # flags = []
+
+# [tmux] controls what a session does to the pane it runs in.
+[tmux]
+# rename = true       # name the window after the session while it runs, and put
+                      # the old name back afterwards; false leaves tmux's own
+                      # naming alone (which calls every ais window "Python")
 
 # [notify] controls what "ais notify" does.
 [notify]
@@ -171,7 +177,19 @@ def harness_settings(config: dict, harness: str) -> dict:
         "env": env,
         "command": list(command),
         "session": session_settings(specific.get("session"), harness),
+        "rename_window": rename_window_setting(config),
     }
+
+
+def rename_window_setting(config: dict) -> bool:
+    """[tmux] rename — whether a session may name the window it runs in."""
+    table = config.get("tmux") or {}
+    if not isinstance(table, dict):
+        die("config: [tmux] must be a table")
+    value = table.get("rename", True)
+    if not isinstance(value, bool):
+        die("config: tmux.rename must be true or false")
+    return value
 
 
 def session_settings(table, harness: str) -> dict | None:
@@ -383,6 +401,53 @@ def pane_is_visible(pane_id: str | None) -> bool:
         return all(int(p) > 0 for p in parts)
     except ValueError:
         return False
+
+
+def window_name(session: dict) -> str:
+    """What to call the window a session runs in.
+
+    The session name first, so the window agrees with "ais name" and with the
+    worktree and branch that name built. Failing that the harness, which at
+    least says what is running there.
+    """
+    return (
+        session.get("slug")
+        or slugify(session.get("description") or "")
+        or session.get("harness")
+        or PROG
+    )
+
+
+@contextmanager
+def window_named(pane: str, name: str):
+    """Name the window after the session for as long as the session runs.
+
+    Left alone, tmux names a window after the process in its active pane, which
+    for every ais session is ais itself — so a screenful of agents all read
+    "Python". Holding a name means turning automatic-rename off, so both the
+    name and that option are put back on the way out; an option that was never
+    set on this window is restored by unsetting it, not by writing the value it
+    happened to inherit.
+    """
+    before = tmux("display-message", "-p", "-t", pane, "-F", "#{window_name}")
+    old_name = before.stdout.strip() if before.returncode == 0 else ""
+    auto = tmux("show-window-options", "-v", "-t", pane, "automatic-rename")
+    old_auto = auto.stdout.strip() if auto.returncode == 0 else ""
+
+    renamed = (
+        tmux("set-window-option", "-t", pane, "automatic-rename", "off").returncode == 0
+        and tmux("rename-window", "-t", pane, name).returncode == 0
+    )
+    try:
+        yield renamed
+    finally:
+        if renamed:
+            if old_name:
+                tmux("rename-window", "-t", pane, old_name)
+            if old_auto:
+                tmux("set-window-option", "-t", pane, "automatic-rename", old_auto)
+            else:
+                tmux("set-window-option", "-u", "-t", pane, "automatic-rename")
 
 
 def tmux_label(session: dict) -> str:
@@ -725,6 +790,12 @@ def launch(session: dict, argv: list[str], settings: dict, dry_run: bool) -> int
             session["id"] = new_id({s.get("id") for s in sessions})
             sessions.append(session)
         mutate_sessions(register)
+        # Settle the name now rather than leaving it to the first "ais name":
+        # the window is about to be labelled with it, and store_slug is what
+        # keeps two sessions that share a description apart.
+        candidate = slugify(session.get("description") or "")
+        if candidate and not session.get("slug"):
+            session["slug"] = store_slug(session["id"], candidate) or candidate
 
     env = os.environ.copy()
     env.update(settings["env"])
@@ -746,22 +817,31 @@ def launch(session: dict, argv: list[str], settings: dict, dry_run: bool) -> int
             print(f"{harness}: {session['session_ids'][-1]}")
         print("cwd:    ", tilde(session["cwd"]))
         print("tmux:   ", tmux_label(session))
+        if settings["rename_window"]:
+            print("window: ", window_name(session))
         return 0
 
-    try:
-        child = subprocess.Popen(argv, env=env, executable=exe, cwd=session["cwd"])
-    except OSError as exc:
-        finish(session["id"], 126)
-        die(f"could not start {argv[0]}: {exc}")
+    pane = (session.get("tmux") or {}).get("pane_id") or ""
+    naming = (
+        window_named(pane, window_name(session))
+        if settings["rename_window"] and pane
+        else nullcontext(False)
+    )
+    with naming:
+        try:
+            child = subprocess.Popen(argv, env=env, executable=exe, cwd=session["cwd"])
+        except OSError as exc:
+            finish(session["id"], 126)
+            die(f"could not start {argv[0]}: {exc}")
 
-    def update_pid(sessions):
-        for s in sessions:
-            if s["id"] == session["id"]:
-                s["pid"] = child.pid
-    mutate_sessions(update_pid)
+        def update_pid(sessions):
+            for s in sessions:
+                if s["id"] == session["id"]:
+                    s["pid"] = child.pid
+        mutate_sessions(update_pid)
 
-    install_forwarding(child)
-    code = wait_for(child)
+        install_forwarding(child)
+        code = wait_for(child)
     finish(session["id"], code)
     return code
 
@@ -1739,6 +1819,11 @@ commands:
   prune [--all]    drop dead sessions older than --days (default 7)
 
 tmux:
+  A session renames its window after itself while it runs — the session name,
+  else the harness — and puts the old name back when it ends; otherwise tmux
+  names every window after the process it sees, which is ais, which is Python.
+  Turn it off with rename = false under [tmux] in config.toml.
+
   bind-key a display-popup -E -w 80% -h 60% -T " ais " \\
     "{tilde(Path(__file__).resolve())} select"
 
@@ -1748,7 +1833,7 @@ tmux:
   unexpanded, so the format arrives literally. select works it out itself.
 
 files:
-  {tilde(CONFIG_PATH)}      per-harness flags and env, [notify] settings
+  {tilde(CONFIG_PATH)}      per-harness flags and env, [tmux] and [notify] settings
   {tilde(SESSIONS_PATH)}    session state
 
 ais must run inside tmux: a session it cannot jump back to is not worth tracking.
