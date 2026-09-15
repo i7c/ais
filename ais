@@ -303,7 +303,13 @@ def tmux_label(session: dict) -> str:
     return f"{loc.get('session_name', '?')}:{loc.get('window_index', '?')}.{loc.get('pane_id', '?')}"
 
 
-def jump_to(session: dict) -> int:
+def jump_to(session: dict, client: str | None = None) -> int:
+    """Point a tmux client at this session's pane.
+
+    client names the client to move, for callers that know it better than tmux
+    can infer it — a key binding passing #{client_name} into a popup, say, where
+    the command runs detached from the pane you pressed the key in.
+    """
     loc = session.get("tmux") or {}
     pane_id = loc.get("pane_id")
     if not pane_id:
@@ -312,7 +318,9 @@ def jump_to(session: dict) -> int:
         die(f"tmux pane {pane_id} for session {session['id']} is gone")
 
     target_session = loc.get("session_id") or loc.get("session_name")
-    if os.environ.get("TMUX"):
+    if client:
+        res = tmux("switch-client", "-c", client, "-t", target_session)
+    elif os.environ.get("TMUX"):
         res = tmux("switch-client", "-t", target_session)
     else:
         # Outside tmux: attaching is the only way to get a client onto it.
@@ -798,6 +806,29 @@ def active_sessions() -> list[dict]:
     return live
 
 
+def client_pane(client: str | None) -> str | None:
+    """The pane a client is looking at, for working out where "here" is.
+
+    A popup has no $TMUX_PANE of its own, so the client it was opened from is
+    the only route back to the pane the key was pressed in.
+    """
+    if not client:
+        return None
+    res = tmux("display-message", "-p", "-c", client, "-F", "#{pane_id}")
+    if res.returncode != 0:
+        return None
+    return res.stdout.strip() or None
+
+
+def session_at_pane(pane_id: str | None, sessions: list[dict]) -> str | None:
+    if not pane_id:
+        return None
+    for s in sessions:
+        if (s.get("tmux") or {}).get("pane_id") == pane_id:
+            return s.get("id")
+    return None
+
+
 def cmd_select(args):
     sessions = active_sessions()
     if not sessions:
@@ -815,19 +846,21 @@ def cmd_select(args):
         reverse=True,
     )
 
-    here = os.environ.get("AIS_SESSION")
+    here = os.environ.get("AIS_SESSION") or session_at_pane(
+        client_pane(args.client), sessions
+    )
     if args.id:
         matches = [s for s in sessions if s["id"].startswith(args.id)]
         if not matches:
             die(f"no active session with id starting {args.id!r}")
         if len(matches) > 1:
             die(f"{args.id!r} matches {len(matches)} sessions")
-        return jump_to(matches[0])
+        return jump_to(matches[0], args.client)
 
     chosen = pick(sessions, here, window)
     if chosen is None:
         return 130
-    return jump_to(chosen)
+    return jump_to(chosen, args.client)
 
 
 def pick(sessions: list[dict], here: str | None, window: float) -> dict | None:
@@ -1032,6 +1065,8 @@ run:
 commands:
   select [id]      pick an active session and switch tmux to its pane;
                    sessions that notified recently are listed first, marked ●
+                   --client NAME moves that client rather than the one tmux
+                   infers; pass #{{client_name}} when running from a popup.
   ls [-a]          list active sessions (-a: dead ones too), with the age of
                    each one's last notification
   status [-a]      ls plus the recent notifications themselves
@@ -1045,6 +1080,13 @@ commands:
                    derived from the description once, then stable for the
                    session's whole life. --set overrides it.
   prune [--all]    drop dead sessions older than --days (default 7)
+
+tmux:
+  bind-key a display-popup -E -w 80% -h 60% -T " ais " \\
+    "{tilde(Path(__file__).resolve())} select --client '#{{client_name}}'"
+
+  Picking from that popup switches the client underneath it and the popup
+  closes on its own, leaving you in the chosen session's pane.
 
 files:
   {tilde(CONFIG_PATH)}      per-harness flags and env, [notify] settings
@@ -1096,6 +1138,7 @@ def main(argv: list[str]) -> int:
 
     p_select = subs.add_parser("select", add_help=False)
     p_select.add_argument("id", nargs="?", default=None)
+    p_select.add_argument("--client", default=None, metavar="NAME")
     p_select.set_defaults(fn=cmd_select)
 
     p_ls = subs.add_parser("ls", add_help=False)
