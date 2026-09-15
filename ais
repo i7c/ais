@@ -1,0 +1,1149 @@
+#!/usr/bin/env python3
+"""ais — ai-session: start an agent harness with the right flags, env and a
+tracked session, so any running agent can be found again later in tmux.
+
+    ais [ais flags] -- <harness> [harness args...]
+    ais select | ls | status | notify | prune | current
+
+Config lives at ~/.ais/config.toml, session state at ~/.ais/sessions.json.
+Sessions are tracked only inside tmux: ais refuses to start outside it, since a
+session it cannot point back to is not worth recording.
+"""
+
+from __future__ import annotations
+
+import argparse
+import fcntl
+import json
+import os
+import re
+import secrets
+import shlex
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import time
+import tomllib
+import unicodedata
+from contextlib import contextmanager
+from datetime import datetime
+from pathlib import Path
+
+PROG = "ais"
+AIS_HOME = Path(os.environ.get("AIS_HOME", Path.home() / ".ais"))
+CONFIG_PATH = AIS_HOME / "config.toml"
+SESSIONS_PATH = AIS_HOME / "sessions.json"
+LOCK_PATH = AIS_HOME / "sessions.lock"
+
+# No 0/1/l/o: ids get read aloud and typed by hand.
+ID_ALPHABET = "23456789abcdefghijkmnpqrstuvwxyz"
+ID_LENGTH = 10
+SESSIONS_VERSION = 1
+
+# Notifications are kept on the session record: they are only interesting while
+# the session is, and they die with it when prune drops it.
+NOTIFY_KEEP = 20          # per session
+NOTIFY_MAX_AGE = 86400    # seconds; older entries are dropped on the next write
+NOTIFY_WINDOW = 60        # minutes counted as "recent" by ls/status/select
+NOTIFY_SOUND = "Glass"
+
+DEFAULT_CONFIG = '''\
+# ais configuration.
+#
+# [defaults] applies to every harness; [harness.<name>] adds to it. The harness
+# name is the token you type after "--" (its basename if you pass a path), so
+# "ais -- claude" reads [harness.claude] and "ais -- pi.dev" reads
+# [harness."pi.dev"].
+#
+# Final argv is:   <command> <config flags> <args you typed after the harness>
+# Yours come last so the same flag typed by hand overrides the config default.
+#
+# env values go through ~ and $VAR expansion.
+
+[defaults]
+flags = []
+
+[defaults.env]
+# MY_SHARED_VAR = "value"
+
+[harness.claude]
+flags = []
+# command = ["claude"]   # override the executable, e.g. ["npx", "claude"]
+
+[harness.claude.env]
+# ANTHROPIC_LOG = "debug"
+
+# [harness."pi.dev"]
+# flags = []
+
+# [notify] controls what "ais notify" does.
+[notify]
+# sound = "Glass"     # macOS notification sound; "" for silent
+# window = 60         # minutes a notification stays "recent" in ls/status/select
+# when_visible = "skip"  # or "send": notify even while you are looking at the pane
+'''
+
+
+def die(msg: str, code: int = 1):
+    print(f"{PROG}: {msg}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def note(msg: str):
+    print(f"{PROG}: {msg}", file=sys.stderr)
+
+
+def now_iso() -> str:
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+# ---------------------------------------------------------------- config
+
+def load_config() -> dict:
+    if not CONFIG_PATH.exists():
+        AIS_HOME.mkdir(parents=True, exist_ok=True)
+        CONFIG_PATH.write_text(DEFAULT_CONFIG)
+        note(f"wrote a starter config to {tilde(CONFIG_PATH)}")
+    try:
+        with CONFIG_PATH.open("rb") as fh:
+            return tomllib.load(fh)
+    except tomllib.TOMLDecodeError as exc:
+        die(f"{tilde(CONFIG_PATH)}: {exc}")
+
+
+def harness_settings(config: dict, harness: str) -> dict:
+    """Merge [defaults] with [harness.<harness>]; flags concatenate, env merges."""
+    defaults = config.get("defaults") or {}
+    table = config.get("harness") or {}
+    specific = table.get(harness)
+    if specific is None:
+        specific = table.get(Path(harness).name) or {}
+
+    for name, src in (("defaults", defaults), (f"harness.{harness}", specific)):
+        if not isinstance(src, dict):
+            die(f"config: [{name}] must be a table")
+
+    flags = list(defaults.get("flags") or []) + list(specific.get("flags") or [])
+    if not all(isinstance(f, str) for f in flags):
+        die(f"config: flags for {harness} must be a list of strings")
+
+    env = {}
+    for src in (defaults.get("env") or {}, specific.get("env") or {}):
+        if not isinstance(src, dict):
+            die(f"config: env for {harness} must be a table")
+        for key, value in src.items():
+            if not isinstance(value, str):
+                die(f"config: env.{key} must be a string")
+            env[key] = os.path.expanduser(os.path.expandvars(value))
+
+    command = specific.get("command") or [harness]
+    if isinstance(command, str):
+        command = [command]
+    if not all(isinstance(c, str) for c in command):
+        die(f"config: command for {harness} must be a string or list of strings")
+
+    return {"flags": flags, "env": env, "command": list(command)}
+
+
+def notify_settings() -> dict:
+    """Read [notify] without forcing a config write when there is nothing to read."""
+    table = {}
+    if CONFIG_PATH.exists():
+        try:
+            with CONFIG_PATH.open("rb") as fh:
+                table = (tomllib.load(fh).get("notify") or {})
+        except tomllib.TOMLDecodeError as exc:
+            die(f"{tilde(CONFIG_PATH)}: {exc}")
+        if not isinstance(table, dict):
+            die("config: [notify] must be a table")
+
+    sound = table.get("sound", NOTIFY_SOUND)
+    window = table.get("window", NOTIFY_WINDOW)
+    when_visible = table.get("when_visible", "skip")
+    if not isinstance(sound, str):
+        die("config: notify.sound must be a string")
+    if not isinstance(window, (int, float)) or isinstance(window, bool) or window < 0:
+        die("config: notify.window must be a non-negative number of minutes")
+    if when_visible not in ("skip", "send"):
+        die('config: notify.when_visible must be "skip" or "send"')
+    return {"sound": sound, "window": float(window), "when_visible": when_visible}
+
+
+# ---------------------------------------------------------------- state
+
+@contextmanager
+def state_lock():
+    """Exclusive lock around every read-modify-write of sessions.json."""
+    AIS_HOME.mkdir(parents=True, exist_ok=True)
+    fd = os.open(LOCK_PATH, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def read_sessions() -> list[dict]:
+    if not SESSIONS_PATH.exists():
+        return []
+    try:
+        data = json.loads(SESSIONS_PATH.read_text() or "{}")
+    except json.JSONDecodeError as exc:
+        die(f"{tilde(SESSIONS_PATH)} is not valid JSON ({exc}); move it aside to start over")
+    sessions = data.get("sessions") if isinstance(data, dict) else data
+    return sessions if isinstance(sessions, list) else []
+
+
+def write_sessions(sessions: list[dict]):
+    AIS_HOME.mkdir(parents=True, exist_ok=True)
+    payload = {"version": SESSIONS_VERSION, "sessions": sessions}
+    tmp = SESSIONS_PATH.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload, indent=2) + "\n")
+    os.replace(tmp, SESSIONS_PATH)  # atomic: readers never see a half file
+
+
+def mutate_sessions(fn):
+    """Apply fn to the session list under lock; return whatever fn returns."""
+    with state_lock():
+        sessions = read_sessions()
+        result = fn(sessions)
+        write_sessions(sessions)
+        return result
+
+
+def new_id(existing: set[str]) -> str:
+    while True:
+        sid = "".join(secrets.choice(ID_ALPHABET) for _ in range(ID_LENGTH))
+        if sid not in existing:
+            return sid
+
+
+# ---------------------------------------------------------------- tmux
+
+def tmux(*args: str, check: bool = False) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["tmux", *args], capture_output=True, text=True, check=check
+    )
+
+
+def require_tmux() -> str:
+    if not os.environ.get("TMUX"):
+        die(
+            "not inside tmux — ais tracks sessions so it can jump back to them, "
+            "which needs a tmux pane. Start tmux first."
+        )
+    pane = os.environ.get("TMUX_PANE")
+    if not pane:
+        die("inside tmux but $TMUX_PANE is unset; cannot locate this pane")
+    if not shutil.which("tmux"):
+        die("tmux not found on PATH")
+    return pane
+
+
+def capture_tmux_location(pane: str) -> dict | None:
+    fmt = "#{session_name}\t#{session_id}\t#{window_id}\t#{window_index}\t#{pane_id}\t#{pane_index}"
+    res = tmux("display-message", "-p", "-t", pane, "-F", fmt)
+    if res.returncode != 0:
+        return None
+    parts = res.stdout.strip().split("\t")
+    if len(parts) != 6:
+        return None
+    keys = ("session_name", "session_id", "window_id", "window_index", "pane_id", "pane_index")
+    return dict(zip(keys, parts))
+
+
+def live_panes() -> set[str]:
+    res = tmux("list-panes", "-a", "-F", "#{pane_id}")
+    if res.returncode != 0:
+        return set()
+    return set(res.stdout.split())
+
+
+def pane_exists(pane_id: str | None, panes: set[str] | None = None) -> bool:
+    if not pane_id:
+        return False
+    return pane_id in (panes if panes is not None else live_panes())
+
+
+def pane_is_visible(pane_id: str | None) -> bool:
+    """True when this pane is the one a tmux client is currently showing.
+
+    Three conditions, all from tmux itself: the pane is the active pane of its
+    window, that window is the active window of its session, and some client is
+    attached to that session. Deliberately blind to whether the terminal
+    emulator is the frontmost app — that is a second question, for later.
+
+    Unknowable counts as not visible: a missed notification is worse than one
+    that arrives while you are already reading the pane.
+    """
+    if not pane_id or not shutil.which("tmux"):
+        return False
+    res = tmux(
+        "display-message", "-p", "-t", pane_id,
+        "-F", "#{pane_active}\t#{window_active}\t#{session_attached}",
+    )
+    if res.returncode != 0:
+        return False
+    parts = res.stdout.strip().split("\t")
+    if len(parts) != 3:
+        return False
+    try:
+        return all(int(p) > 0 for p in parts)
+    except ValueError:
+        return False
+
+
+def tmux_label(session: dict) -> str:
+    loc = session.get("tmux") or {}
+    if not loc:
+        return "-"
+    return f"{loc.get('session_name', '?')}:{loc.get('window_index', '?')}.{loc.get('pane_id', '?')}"
+
+
+def jump_to(session: dict) -> int:
+    loc = session.get("tmux") or {}
+    pane_id = loc.get("pane_id")
+    if not pane_id:
+        die(f"session {session['id']} has no recorded tmux location")
+    if not pane_exists(pane_id):
+        die(f"tmux pane {pane_id} for session {session['id']} is gone")
+
+    target_session = loc.get("session_id") or loc.get("session_name")
+    if os.environ.get("TMUX"):
+        res = tmux("switch-client", "-t", target_session)
+    else:
+        # Outside tmux: attaching is the only way to get a client onto it.
+        res = tmux("attach-session", "-t", target_session)
+    if res.returncode != 0:
+        die(f"tmux: {res.stderr.strip() or 'could not reach that session'}")
+
+    tmux("select-window", "-t", pane_id)
+    tmux("select-pane", "-t", pane_id)
+    return 0
+
+
+# ---------------------------------------------------------------- reaping
+
+def process_alive(pid: int | None) -> bool:
+    if not pid:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists, just not ours
+    return True
+
+
+def reap(sessions: list[dict]) -> int:
+    """Mark sessions dead when their process or tmux pane is gone.
+
+    Only judges sessions recorded on this host: a pid from another machine says
+    nothing about a pid here.
+    """
+    host = socket.gethostname()
+    candidates = [
+        s for s in sessions
+        if s.get("status") == "active" and s.get("hostname") == host
+    ]
+    if not candidates:
+        return 0
+
+    panes = live_panes()  # one tmux call for the whole sweep
+    reaped = 0
+    for s in candidates:
+        pid = s.get("pid")
+        loc = s.get("tmux") or {}
+        # pids get reused, so require both signals before declaring death
+        if process_alive(pid) and pane_exists(loc.get("pane_id"), panes):
+            continue
+        s["status"] = "dead"
+        s["ended_at"] = s.get("ended_at") or now_iso()
+        s.setdefault("exit_code", None)
+        s["reaped"] = True
+        reaped += 1
+    return reaped
+
+
+# ---------------------------------------------------------------- display
+
+def tilde(path) -> str:
+    text = str(path)
+    home = str(Path.home())
+    return "~" + text[len(home):] if text.startswith(home) else text
+
+
+def parse_stamp(text: str | None) -> datetime | None:
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def seconds_since(text: str | None) -> float | None:
+    then = parse_stamp(text)
+    if then is None:
+        return None
+    return (datetime.now().astimezone() - then).total_seconds()
+
+
+def age_str(secs: float | None) -> str:
+    if secs is None:
+        return "-"
+    secs = int(secs)
+    if secs < 60:
+        return f"{secs}s"
+    if secs < 3600:
+        return f"{secs // 60}m"
+    if secs < 86400:
+        return f"{secs // 3600}h"
+    return f"{secs // 86400}d"
+
+
+def age_of(session: dict) -> str:
+    return age_str(seconds_since(session.get("started_at")))
+
+
+def describe(session: dict) -> str:
+    desc = (session.get("description") or "").strip()
+    if desc:
+        return desc
+    return f"({session.get('harness', 'session')} in {tilde(session.get('cwd', '?'))})"
+
+
+def elide(text: str, width: int) -> str:
+    return text if len(text) <= width else text[: width - 1] + "…"
+
+
+# ---------------------------------------------------------------- notify
+
+def notifications_of(session: dict) -> list[dict]:
+    items = session.get("notifications")
+    return items if isinstance(items, list) else []
+
+
+def last_notification(session: dict) -> dict | None:
+    items = notifications_of(session)
+    return items[-1] if items else None
+
+
+def recent_notifications(session: dict, window_minutes: float) -> list[dict]:
+    limit = window_minutes * 60
+    out = []
+    for n in notifications_of(session):
+        secs = seconds_since(n.get("at"))
+        if secs is not None and secs <= limit:
+            out.append(n)
+    return out
+
+
+def notify_tag(session: dict | None) -> str:
+    """The short human label that tells parallel sessions apart in a banner."""
+    if session:
+        tag = (session.get("description") or session.get("slug") or "").strip()
+        if tag:
+            return tag
+    tag = (os.environ.get("AIS_SESSION_DESCRIPTION") or "").strip()
+    return tag or os.environ.get("AIS_SESSION", "") or ""
+
+
+def applescript_string(text: str) -> str:
+    escaped = text.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def deliver_macos(title: str, message: str, sound: str) -> tuple[bool, str | None]:
+    script = (
+        f"display notification {applescript_string(message)} "
+        f"with title {applescript_string(title)}"
+    )
+    if sound:
+        script += f" sound name {applescript_string(sound)}"
+    res = subprocess.run(
+        ["osascript", "-e", script], capture_output=True, text=True
+    )
+    if res.returncode != 0:
+        return False, res.stderr.strip() or "osascript failed"
+    return True, None
+
+
+def deliver_linux(title: str, message: str, sound: str) -> tuple[bool, str | None]:
+    if not shutil.which("notify-send"):
+        # Headless Linux gets its own backend later; the record is the fallback.
+        return False, "no desktop notifier found (notify-send missing)"
+    res = subprocess.run(
+        ["notify-send", "--app-name=ais", title, message],
+        capture_output=True, text=True,
+    )
+    if res.returncode != 0:
+        return False, res.stderr.strip() or "notify-send failed"
+    return True, None
+
+
+def deliver_desktop(title: str, message: str, sound: str) -> tuple[bool, str | None]:
+    if sys.platform == "darwin":
+        return deliver_macos(title, message, sound)
+    if sys.platform.startswith("linux"):
+        return deliver_linux(title, message, sound)
+    return False, f"no notification backend for {sys.platform}"
+
+
+def record_notification(sid: str, entry: dict) -> bool:
+    """Append entry to sid's notification list; returns False if sid is unknown."""
+    def apply(sessions):
+        target = next((s for s in sessions if s.get("id") == sid), None)
+        if target is None:
+            return False
+        items = [n for n in notifications_of(target) if isinstance(n, dict)]
+        items.append(entry)
+        fresh = [
+            n for n in items
+            if (seconds_since(n.get("at")) or 0) <= NOTIFY_MAX_AGE
+        ]
+        target["notifications"] = (fresh or items)[-NOTIFY_KEEP:]
+        return True
+
+    return mutate_sessions(apply)
+
+
+def cmd_notify(args):
+    """Raise a desktop notification for this session and remember that it happened.
+
+    Skipped — recorded, but not shown — while the session's own pane is the one
+    on screen, since a banner about a pane you are reading is just noise.
+    """
+    message = " ".join(args.message).strip()
+    if not message:
+        die("nothing to say: ais notify \"the message\"")
+
+    settings = notify_settings()
+    sid = os.environ.get("AIS_SESSION")
+    session = next((s for s in read_sessions() if s.get("id") == sid), None) if sid else None
+
+    # The session's own recorded pane is the one that matters — $TMUX_PANE only
+    # answers for the shell that happens to be running this command.
+    pane_id = ((session or {}).get("tmux") or {}).get("pane_id") or os.environ.get("TMUX_PANE")
+    visible = pane_is_visible(pane_id)
+    suppress = visible and settings["when_visible"] == "skip" and not args.force
+
+    tag = args.tag if args.tag is not None else notify_tag(session)
+    harness = (session or {}).get("harness") or os.environ.get("AIS_HARNESS") or PROG
+    title = args.title or (f"{harness} — {elide(tag, 40)}" if tag else harness)
+    sound = "" if args.no_sound else settings["sound"]
+
+    delivered, error = (False, None)
+    if not suppress:
+        delivered, error = deliver_desktop(title, message, sound)
+
+    entry = {
+        "at": now_iso(),
+        "message": message,
+        "delivered": delivered,
+        "suppressed": suppress,
+    }
+    if error:
+        entry["error"] = error
+
+    if sid:
+        if not record_notification(sid, entry):
+            note(f"session {sid} is not on record; notification not remembered")
+    elif not args.quiet:
+        note("not inside an ais session; notification sent but not recorded")
+
+    if error and not args.quiet:
+        note(f"could not raise a desktop notification: {error}")
+    if suppress and not args.quiet:
+        note("pane is on screen; recorded without a banner (--force to override)")
+    return 0 if (delivered or suppress) else 1
+
+
+# ---------------------------------------------------------------- run
+
+def cmd_run(args, harness_argv: list[str]):
+    config = load_config()
+    pane = require_tmux()
+
+    harness = harness_argv[0]
+    settings = harness_settings(config, harness)
+    argv = settings["command"] + settings["flags"] + harness_argv[1:]
+
+    exe = shutil.which(argv[0])
+    if not exe:
+        die(f"harness not found on PATH: {argv[0]}")
+
+    location = capture_tmux_location(pane)
+    if location is None:
+        die(f"could not read the tmux location of pane {pane}")
+
+    session = {
+        "id": None,  # assigned and appended under a single lock below
+        "description": args.description,
+        "harness": harness,
+        "command": argv,
+        "status": "active",
+        "pid": None,  # filled in once the child exists
+        "hostname": socket.gethostname(),
+        "cwd": os.getcwd(),
+        "tmux": location,
+        "started_at": now_iso(),
+        "ended_at": None,
+        "exit_code": None,
+    }
+
+    if args.dry_run:
+        session["id"] = new_id({s.get("id") for s in read_sessions()})
+    else:
+        def register(sessions):
+            session["id"] = new_id({s.get("id") for s in sessions})
+            sessions.append(session)
+        mutate_sessions(register)
+
+    env = os.environ.copy()
+    env.update(settings["env"])
+    env["AIS_SESSION"] = session["id"]
+    env["AIS_HARNESS"] = harness
+    if args.description:
+        env["AIS_SESSION_DESCRIPTION"] = args.description
+
+    if args.dry_run:
+        print("session:", session["id"], "(dry run, not recorded)")
+        print("command:", shlex.join(argv))
+        for key, value in sorted(settings["env"].items()):
+            print(f"env:     {key}={value}")
+        print(f"env:     AIS_SESSION={session['id']}")
+        print(f"env:     AIS_HARNESS={harness}")
+        if args.description:
+            print(f"env:     AIS_SESSION_DESCRIPTION={args.description}")
+        print("tmux:   ", tmux_label(session))
+        return 0
+
+    try:
+        child = subprocess.Popen(argv, env=env, executable=exe)
+    except OSError as exc:
+        finish(session["id"], 126)
+        die(f"could not start {argv[0]}: {exc}")
+
+    def update_pid(sessions):
+        for s in sessions:
+            if s["id"] == session["id"]:
+                s["pid"] = child.pid
+    mutate_sessions(update_pid)
+
+    install_forwarding(child)
+    code = wait_for(child)
+    finish(session["id"], code)
+    return code
+
+
+def install_forwarding(child: subprocess.Popen):
+    """Keep ais alive through the signals the harness should own.
+
+    SIGINT/SIGWINCH already reach the child directly (same foreground process
+    group), so ais just declines to die on them. SIGTERM/SIGHUP are forwarded,
+    then ais waits so it can still write the session's exit status.
+
+    These must be Python-level handlers, not SIG_IGN: exec resets handled
+    signals to their default in the child, whereas SIG_IGN would be inherited
+    and Ctrl-C would stop working inside the harness.
+    """
+
+    def ignore(signum, frame):
+        pass
+
+    def forward(signum, frame):
+        try:
+            child.send_signal(signum)
+        except ProcessLookupError:
+            pass
+
+    signal.signal(signal.SIGINT, ignore)
+    signal.signal(signal.SIGQUIT, ignore)
+    if hasattr(signal, "SIGWINCH"):
+        signal.signal(signal.SIGWINCH, ignore)
+    signal.signal(signal.SIGTERM, forward)
+    signal.signal(signal.SIGHUP, forward)
+
+
+def wait_for(child: subprocess.Popen) -> int:
+    while True:
+        try:
+            status = child.wait()
+            break
+        except KeyboardInterrupt:
+            continue  # the child owns Ctrl-C
+    return 128 - status if status < 0 else status
+
+
+def finish(session_id: str, code: int):
+    def apply(sessions):
+        for s in sessions:
+            if s["id"] == session_id:
+                s["status"] = "dead"
+                s["ended_at"] = now_iso()
+                s["exit_code"] = code
+    mutate_sessions(apply)
+
+
+# ---------------------------------------------------------------- name
+
+# Dropped when shortening a description: they never help tell two sessions apart.
+STOPWORDS = {
+    "a", "an", "the", "and", "or", "for", "of", "to", "in", "on", "at", "with",
+    "from", "into", "my", "our", "this", "that", "it", "its", "be", "is", "are",
+    "make", "just", "some", "up", "out", "please",
+}
+SLUG_WORDS = 4
+SLUG_MAX = 32
+
+
+def slugify(text: str) -> str:
+    """Kebab-case a description down to the few words that identify it.
+
+    Deterministic on purpose: the same description must always yield the same
+    name, whoever asks and however many times.
+    """
+    ascii_text = (
+        unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
+    )
+    words = [w for w in re.split(r"[^A-Za-z0-9]+", ascii_text.lower()) if w]
+    kept = [w for w in words if w not in STOPWORDS] or words
+
+    out: list[str] = []
+    for word in kept[:SLUG_WORDS]:
+        if out and len("-".join(out)) + 1 + len(word) > SLUG_MAX:
+            break  # stop at a word boundary rather than truncating mid-word
+        out.append(word)
+    return "-".join(out)[:SLUG_MAX].strip("-")
+
+
+def cmd_name(args):
+    """Print the session base name for worktrees, branches and the like.
+
+    Derived once from the description, then persisted, so every later call in
+    this session — in any repo — returns the same name.
+    """
+    sid = os.environ.get("AIS_SESSION")
+    if not sid:
+        note("not running inside an ais session; no session name to derive")
+        return 1
+
+    if args.set:
+        chosen = slugify(args.set)
+        if not chosen:
+            die(f"{args.set!r} has no usable characters for a name")
+        if not store_slug(sid, chosen, force=True):
+            note(f"session {sid} is not on record; name not persisted")
+        print(chosen)
+        return 0
+
+    existing = next((s for s in read_sessions() if s.get("id") == sid), None)
+    if existing and existing.get("slug"):
+        print(existing["slug"])
+        return 0
+
+    description = (
+        (existing or {}).get("description")
+        or os.environ.get("AIS_SESSION_DESCRIPTION")
+        or ""
+    )
+    candidate = slugify(description) or sid
+
+    if existing is None:
+        # Session was pruned; still answer, just without remembering.
+        print(candidate)
+        return 0
+
+    print(store_slug(sid, candidate) or candidate)
+    return 0
+
+
+def store_slug(sid: str, candidate: str, force: bool = False) -> str | None:
+    """Persist a name for sid, disambiguating against other sessions' names.
+
+    Returns the stored name, or None if sid is not on record.
+    """
+    def apply(sessions):
+        target = next((s for s in sessions if s.get("id") == sid), None)
+        if target is None:
+            return None
+        if target.get("slug") and not force:
+            return target["slug"]
+        taken = {
+            s.get("slug") for s in sessions
+            if s.get("slug") and s.get("id") != sid
+        }
+        name = candidate
+        if name in taken:
+            # Same description, different session: keep the readable stem and
+            # let the id make it unique.
+            name = f"{candidate[:SLUG_MAX - 5].rstrip('-')}-{sid[:4]}"
+        target["slug"] = name
+        return name
+
+    return mutate_sessions(apply)
+
+
+# ---------------------------------------------------------------- select
+
+def active_sessions() -> list[dict]:
+    sessions = mutate_sessions(lambda ss: (reap(ss), ss)[1])
+    live = [s for s in sessions if s.get("status") == "active"]
+    live.sort(key=lambda s: s.get("started_at") or "", reverse=True)
+    return live
+
+
+def cmd_select(args):
+    sessions = active_sessions()
+    if not sessions:
+        note("no active sessions")
+        return 1
+
+    window = notify_settings()["window"]
+    # Sessions that have called for you float to the top, so jumping between
+    # the ones that want attention is a matter of taking the first rows.
+    sessions.sort(
+        key=lambda s: (
+            bool(recent_notifications(s, window)),
+            (last_notification(s) or {}).get("at") or "",
+        ),
+        reverse=True,
+    )
+
+    here = os.environ.get("AIS_SESSION")
+    if args.id:
+        matches = [s for s in sessions if s["id"].startswith(args.id)]
+        if not matches:
+            die(f"no active session with id starting {args.id!r}")
+        if len(matches) > 1:
+            die(f"{args.id!r} matches {len(matches)} sessions")
+        return jump_to(matches[0])
+
+    chosen = pick(sessions, here, window)
+    if chosen is None:
+        return 130
+    return jump_to(chosen)
+
+
+def pick(sessions: list[dict], here: str | None, window: float) -> dict | None:
+    rows = []
+    for s in sessions:
+        fresh = recent_notifications(s, window)
+        mark = "●" if fresh else ("*" if s["id"] == here else " ")
+        if fresh:
+            last = fresh[-1]
+            trailer = f"{age_str(seconds_since(last.get('at'))):>4}  {elide(last.get('message', ''), 34)}"
+        else:
+            trailer = f"{'':>4}  {elide(tilde(s.get('cwd', '?')), 34)}"
+        rows.append(
+            "\t".join([
+                s["id"],
+                f"{mark} {elide(describe(s), 58):<58} {age_of(s):>4}  {s.get('harness', '?'):<10} {trailer}",
+            ])
+        )
+
+    if shutil.which("fzf") and sys.stdin.isatty():
+        preview = f"{shlex.quote(sys.executable)} {shlex.quote(os.path.abspath(__file__))} _preview {{1}}"
+        res = subprocess.run(
+            [
+                "fzf",
+                "--delimiter=\t",
+                "--with-nth=2..",
+                "--prompt=ais session> ",
+                "--header=enter select   esc cancel   ● notified recently",
+                "--height=~60%",
+                "--reverse",
+                "--preview", preview,
+                "--preview-window=right:44%",
+            ],
+            input="\n".join(rows),
+            capture_output=True,
+            text=True,
+        )
+        if res.returncode != 0 or not res.stdout.strip():
+            return None
+        sid = res.stdout.split("\t", 1)[0].strip()
+        return next((s for s in sessions if s["id"] == sid), None)
+
+    # fzf missing or not a tty: numbered prompt
+    for i, s in enumerate(sessions, 1):
+        print(f"{i:>3}. {rows[i - 1].split(chr(9), 1)[1]}")
+    try:
+        answer = input("select> ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return None
+    if not answer.isdigit() or not 1 <= int(answer) <= len(sessions):
+        die("not a valid selection")
+    return sessions[int(answer) - 1]
+
+
+def cmd_preview(args):
+    """Hidden: renders the fzf preview pane for one session."""
+    session = next((s for s in read_sessions() if s["id"] == args.id), None)
+    if session is None:
+        return 1
+    fields = [
+        ("id", session["id"]),
+        ("name", session.get("slug") or "-"),
+        ("status", session.get("status", "?")),
+        ("harness", session.get("harness", "?")),
+        ("age", age_of(session)),
+        ("started", session.get("started_at", "?")),
+        ("cwd", tilde(session.get("cwd", "?"))),
+        ("tmux", tmux_label(session)),
+        ("pid", str(session.get("pid") or "-")),
+        ("host", session.get("hostname", "?")),
+    ]
+    desc = (session.get("description") or "").strip()
+    if desc:
+        print(desc)
+        print()
+    for key, value in fields:
+        print(f"{key:>8}  {value}")
+    print(f"{'command':>8}  {shlex.join(session.get('command') or [])}")
+
+    items = notifications_of(session)[-5:]
+    if items:
+        print()
+        print("notifications")
+        for n in items:
+            flag = "" if n.get("delivered") else "  (no banner)"
+            stamp = age_str(seconds_since(n.get("at")))
+            print(f"{stamp:>8}  {n.get('message', '')}{flag}")
+    return 0
+
+
+# ---------------------------------------------------------------- ls / prune / current
+
+def cmd_ls(args):
+    """ls: one line per session. status: the same, plus recent notifications.
+
+    The NOTIFY column is the age of the last notification; "●" in the margin
+    means it landed inside the notify window and is probably still waiting for
+    you.
+    """
+    detail = getattr(args, "detail", False)
+    window = getattr(args, "window", None)
+    if window is None:
+        window = notify_settings()["window"]
+
+    sessions = mutate_sessions(lambda ss: (reap(ss), ss)[1])
+    if not args.all:
+        sessions = [s for s in sessions if s.get("status") == "active"]
+    sessions.sort(key=lambda s: s.get("started_at") or "", reverse=True)
+    if detail:
+        # Whatever called for you goes first, most recent call at the top.
+        sessions.sort(
+            key=lambda s: (
+                bool(recent_notifications(s, window)),
+                (last_notification(s) or {}).get("at") or "",
+            ),
+            reverse=True,
+        )
+    if not sessions:
+        note("no active sessions" if not args.all else "no sessions")
+        return 0
+
+    here = os.environ.get("AIS_SESSION")
+    print(
+        f"{'':1} {'ID':<11} {'STATUS':<7} {'AGE':>4} {'NOTIFY':>6} "
+        f"{'HARNESS':<10} {'TMUX':<18} DESCRIPTION"
+    )
+    for s in sessions:
+        last = last_notification(s)
+        mark = "●" if recent_notifications(s, window) else ("*" if s["id"] == here else " ")
+        print(
+            f"{mark} {s['id']:<11} {s.get('status', '?'):<7} {age_of(s):>4} "
+            f"{age_str(seconds_since((last or {}).get('at'))):>6} "
+            f"{elide(s.get('harness', '?'), 10):<10} {elide(tmux_label(s), 18):<18} "
+            f"{elide(describe(s), 48)}"
+        )
+        if detail:
+            for n in recent_notifications(s, window)[-3:]:
+                flag = "" if n.get("delivered") else "  (no banner)"
+                stamp = age_str(seconds_since(n.get("at")))
+                print(f"    {stamp:>4} ago  {n.get('message', '')}{flag}")
+    if detail and not any(recent_notifications(s, window) for s in sessions):
+        sys.stdout.flush()  # keep the note under the table, not above it
+        note(f"no notifications in the last {int(window)}m")
+    return 0
+
+
+def cmd_prune(args):
+    cutoff = time.time() - args.days * 86400
+
+    def apply(sessions):
+        reap(sessions)
+        keep, dropped = [], 0
+        for s in sessions:
+            if s.get("status") == "active":
+                keep.append(s)
+                continue
+            if args.all:
+                dropped += 1
+                continue
+            ended = s.get("ended_at") or s.get("started_at")
+            try:
+                stamp = datetime.fromisoformat(ended).timestamp() if ended else 0
+            except ValueError:
+                stamp = 0
+            if stamp < cutoff:
+                dropped += 1
+            else:
+                keep.append(s)
+        sessions[:] = keep
+        return dropped
+
+    dropped = mutate_sessions(apply)
+    note(f"pruned {dropped} dead session(s)")
+    return 0
+
+
+def cmd_current(args):
+    sid = os.environ.get("AIS_SESSION")
+    if not sid:
+        note("not running inside an ais session")
+        return 1
+    session = next((s for s in read_sessions() if s["id"] == sid), None)
+    if session is None:
+        note(f"AIS_SESSION={sid} is not in {tilde(SESSIONS_PATH)}")
+        return 1
+    args.id = sid
+    return cmd_preview(args)
+
+
+# ---------------------------------------------------------------- cli
+
+USAGE = f"""usage: {PROG} [options] -- <harness> [harness args...]
+       {PROG} <command> [options]
+
+run:
+  {PROG} -- claude                     start claude in a tracked session
+  {PROG} -d "fix the auth bug" -- claude
+  -d, --description TEXT             what this session is for; shown by select
+  -n, --dry-run                      print the command and env, run nothing
+
+commands:
+  select [id]      pick an active session and switch tmux to its pane;
+                   sessions that notified recently are listed first, marked ●
+  ls [-a]          list active sessions (-a: dead ones too), with the age of
+                   each one's last notification
+  status [-a]      ls plus the recent notifications themselves
+  notify TEXT      raise a desktop notification for this session and record it.
+                   Skipped, but still recorded, while this session's own pane is
+                   the one on screen; -f/--force sends anyway.
+                   -t/--title TEXT overrides the banner title,
+                   --tag TEXT the session label in it, -q/--quiet the chatter.
+  current          show the session this shell is running in
+  name [--set N]   print this session's base name, for worktrees and branches;
+                   derived from the description once, then stable for the
+                   session's whole life. --set overrides it.
+  prune [--all]    drop dead sessions older than --days (default 7)
+
+files:
+  {tilde(CONFIG_PATH)}      per-harness flags and env, [notify] settings
+  {tilde(SESSIONS_PATH)}    session state
+
+ais must run inside tmux: a session it cannot jump back to is not worth tracking.
+"""
+
+
+def split_argv(argv: list[str]) -> tuple[list[str], list[str] | None]:
+    """Split at the first bare '--'. Returns (ais args, harness argv or None)."""
+    if "--" not in argv:
+        return argv, None
+    at = argv.index("--")
+    return argv[:at], argv[at + 1:]
+
+
+def main(argv: list[str]) -> int:
+    ais_args, harness_argv = split_argv(argv)
+
+    if harness_argv is not None:
+        if not harness_argv:
+            die("nothing after '--': name the agent harness, e.g. ais -- claude")
+        parser = argparse.ArgumentParser(prog=PROG, add_help=False)
+        parser.add_argument("-d", "--description", default=None)
+        parser.add_argument("-n", "--dry-run", action="store_true")
+        parser.add_argument("-h", "--help", action="store_true")
+        args, unknown = parser.parse_known_args(ais_args)
+        if args.help:
+            print(USAGE, end="")
+            return 0
+        if unknown:
+            die(f"unknown option(s) before '--': {' '.join(unknown)}")
+        return cmd_run(args, harness_argv)
+
+    if not ais_args or ais_args[0] in ("-h", "--help", "help"):
+        print(USAGE, end="")
+        return 0
+
+    commands = (
+        "select", "ls", "status", "notify", "prune", "current", "name", "_preview"
+    )
+    if ais_args[0] not in commands:
+        hint = f"; to run a harness, separate it with '--': {PROG} -- {shlex.join(ais_args)}"
+        die(f"unknown command {ais_args[0]!r}{hint if not ais_args[0].startswith('-') else ''}")
+
+    parser = argparse.ArgumentParser(prog=PROG, add_help=False)
+    subs = parser.add_subparsers(dest="command")
+
+    p_select = subs.add_parser("select", add_help=False)
+    p_select.add_argument("id", nargs="?", default=None)
+    p_select.set_defaults(fn=cmd_select)
+
+    p_ls = subs.add_parser("ls", add_help=False)
+    p_ls.add_argument("-a", "--all", action="store_true")
+    p_ls.add_argument("--window", type=float, default=None, metavar="MIN")
+    p_ls.set_defaults(fn=cmd_ls, detail=False)
+
+    p_status = subs.add_parser("status", add_help=False)
+    p_status.add_argument("-a", "--all", action="store_true")
+    p_status.add_argument("--window", type=float, default=None, metavar="MIN")
+    p_status.set_defaults(fn=cmd_ls, detail=True)
+
+    p_notify = subs.add_parser("notify", add_help=False)
+    p_notify.add_argument("message", nargs="+")
+    p_notify.add_argument("-t", "--title", default=None)
+    p_notify.add_argument("--tag", default=None)
+    p_notify.add_argument("-f", "--force", action="store_true")
+    p_notify.add_argument("--no-sound", action="store_true")
+    p_notify.add_argument("-q", "--quiet", action="store_true")
+    p_notify.set_defaults(fn=cmd_notify)
+
+    p_prune = subs.add_parser("prune", add_help=False)
+    p_prune.add_argument("--all", action="store_true", help="drop every dead session")
+    p_prune.add_argument("--days", type=float, default=7)
+    p_prune.set_defaults(fn=cmd_prune)
+
+    p_current = subs.add_parser("current", add_help=False)
+    p_current.set_defaults(fn=cmd_current)
+
+    p_name = subs.add_parser("name", add_help=False)
+    p_name.add_argument("--set", default=None, metavar="NAME")
+    p_name.set_defaults(fn=cmd_name)
+
+    p_preview = subs.add_parser("_preview", add_help=False)
+    p_preview.add_argument("id")
+    p_preview.set_defaults(fn=cmd_preview)
+
+    try:
+        args = parser.parse_args(ais_args)
+    except SystemExit:
+        return 2
+    if not getattr(args, "fn", None):
+        die(f"unknown command {ais_args[0]!r}; try '{PROG} --help'")
+    return args.fn(args)
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main(sys.argv[1:]))
+    except BrokenPipeError:
+        os._exit(0)
