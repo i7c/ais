@@ -54,19 +54,19 @@ NOTIFY_SOUND = "Glass"
 # fresh one in the same process), so the ids are a history, newest last.
 SESSION_ID_KEEP = 20
 
-# What "ais install" writes into ~/.claude/CLAUDE.md — how an agent running
-# inside a session is meant to use ais — between these markers, so a later
-# install replaces its own section and nothing else.
-CLAUDE_MD_BEGIN = "<!-- ais:begin -->"
-CLAUDE_MD_END = "<!-- ais:end -->"
+# What "ais install" writes into a harness's global instructions — how an agent
+# running inside a session is meant to use ais — between these markers, so a
+# later install replaces its own section and nothing else.
+SECTION_BEGIN = "<!-- ais:begin -->"
+SECTION_END = "<!-- ais:end -->"
 
 DEFAULT_CONFIG = '''\
 # ais configuration.
 #
 # [defaults] applies to every harness; [harness.<name>] adds to it. The harness
 # name is the token you type after "--" (its basename if you pass a path), so
-# "ais -- claude" reads [harness.claude] and "ais -- pi.dev" reads
-# [harness."pi.dev"].
+# "ais -- claude" reads [harness.claude] and "ais -- pi" reads [harness.pi]. A
+# name with a dot in it has to be quoted: [harness."my-agent.sh"].
 #
 # Final argv is:   <command> <config flags> <args you typed after the harness>
 # Yours come last so the same flag typed by hand overrides the config default.
@@ -97,8 +97,11 @@ flags = []
 # resume = ["--resume", "{id}"]
 # conflicts = ["-c", "--continue", "--fork-session"]   # you typed it: ais keeps out
 
-# [harness."pi.dev"]
+# [harness.pi]
 # flags = []
+
+# [harness.pi.env]
+# PI_CACHE_RETENTION = "long"
 
 # [tmux] controls what a session does to the pane it runs in.
 [tmux]
@@ -1008,7 +1011,9 @@ def session_seen(args) -> int:
         # No payload to read: the harness still exports its own id, and a hook
         # runs as its child. Only good for "which conversation am I in now",
         # which is exactly the question.
-        for var in ("AIS_HARNESS_SESSION_ID", "CLAUDE_CODE_SESSION_ID"):
+        for var in (
+            "AIS_HARNESS_SESSION_ID", "CLAUDE_CODE_SESSION_ID", "PI_SESSION_ID",
+        ):
             conversation = os.environ.get(var)
             if conversation:
                 break
@@ -1539,6 +1544,9 @@ def cmd_prune(args):
 
 # ---------------------------------------------------------------- install
 
+# What "ais install --harness <name>" adds to ais's own config: how that harness
+# names conversations, so "ais restart" can pick one up again.
+
 CLAUDE_SESSION_CONFIG = '''
 # Added by "ais install --harness claude": how claude names conversations, so
 # "ais restart" can pick one up again.
@@ -1549,12 +1557,24 @@ resume = ["--resume", "{id}"]
 conflicts = ["-c", "--continue", "--fork-session"]
 '''
 
-CLAUDE_MD_SECTION = '''\
+PI_SESSION_CONFIG = '''
+# Added by "ais install --harness pi": how pi names conversations, so "ais
+# restart" can pick one up again. pi's --session-id opens the session with that
+# id and creates one when there is none, so a single flag serves both.
+[harness.pi.session]
+id = "uuid4"
+new = ["--session-id", "{id}"]
+resume = ["--session-id", "{id}"]
+conflicts = ["-c", "--continue", "-r", "--resume", "--session", "--fork", "--no-session"]
+'''
+
+# The house rules, shared by every harness: they are about ais, not about who is
+# reading them. {harness} and {notify_lead} are the only parts that differ, and
+# instructions() fills them in.
+INSTRUCTIONS = '''\
 ## Notifications
 
-`ais notify` is how you get my attention. Use it instead of the built-in
-notification tool, which suppresses itself whenever tmux/the terminal looks
-active — which for me is always:
+{notify_lead}
 
 ```
 ais notify "the deps sweep finished; 3 tests still failing"
@@ -1593,7 +1613,7 @@ later. When `$AIS_SESSION` is set you are running inside one:
 
 - `$AIS_SESSION` — the 10-char ais id, e.g. `vw86nyuhe6`
 - `$AIS_SESSION_DESCRIPTION` — what I said the session is for (may be unset)
-- `$AIS_HARNESS` — the harness name, normally `claude`
+- `$AIS_HARNESS` — the harness name, normally `{harness}`
 
 Use these opportunistically, never require them: outside ais they are all unset
 and every rule here just falls back to asking me.
@@ -1618,7 +1638,7 @@ Interacting with ais:
   running or which session is which.
 - NEVER run `ais select`. It switches my tmux client to another session's pane,
   yanking my view away from wherever I am. That command is mine.
-- NEVER start a session yourself — no `ais -- claude` (that nests a harness
+- NEVER start a session yourself — no `ais -- {harness}` (that nests a harness
   inside this one) and no launching an agent harness directly.
 - NEVER run `ais restart`. It takes over the pane it runs in and puts another
   agent back to work; deciding that is mine.
@@ -1628,9 +1648,68 @@ Interacting with ais:
   edit when I ask.
 '''
 
+# How each harness's own notification story is worth mentioning, if at all.
+NOTIFY_LEAD = {
+    "claude": """`ais notify` is how you get my attention. Use it instead of the built-in
+notification tool, which suppresses itself whenever tmux/the terminal looks
+active — which for me is always:""",
+    "pi": "`ais notify` is how you get my attention:",
+}
+
+# The first line of the file ais owns in pi's extensions directory, so a later
+# install can tell its own work from somebody else's file of the same name.
+PI_EXTENSION_MARKER = "ais:generated"
+
+PI_EXTENSION = '''\
+// {marker} — "ais install --harness pi" writes and rewrites this file.
+//
+// Tells ais which pi session this pane is in, so "ais restart" can reopen it.
+// session_start fires on startup and again on /new, /resume, /fork and /clone —
+// every moment the session id changes under a running pi.
+//
+// Nothing in here may throw. pi lets an extension's exception reach the top and
+// dies on it, and losing the session you are working in is a far worse outcome
+// than losing the id ais wanted to write down — hence the catch-all, and hence
+// the error listener, without which node turns a missing ais into a crash.
+// detached, so that a pi exiting a moment later does not take the child with it.
+import { spawn } from "node:child_process";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+
+export default function (pi: ExtensionAPI) {
+  pi.on("session_start", (_event, ctx) => {
+    try {
+      if (!process.env.AIS_SESSION) return;  // a pi that ais did not start
+      const id = ctx.sessionManager?.getSessionId?.();
+      if (!id) return;                       // ephemeral: nothing to reopen later
+      const child = spawn({ais}, ["_session-seen", id], {
+        stdio: "ignore",
+        detached: true,
+      });
+      child.on("error", () => {});
+      child.unref();
+    } catch {
+      // ais is not reachable from here; the session still runs fine without it.
+    }
+  });
+}
+'''
+
+
+def instructions(harness: str) -> str:
+    """The house rules, rendered for one harness."""
+    return (
+        INSTRUCTIONS
+        .replace("{notify_lead}", NOTIFY_LEAD[harness])
+        .replace("{harness}", harness)
+    )
+
 
 def claude_dir() -> Path:
     return Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude"))
+
+
+def pi_dir() -> Path:
+    return Path(os.environ.get("PI_CODING_AGENT_DIR", Path.home() / ".pi" / "agent"))
 
 
 def ais_command() -> str:
@@ -1650,21 +1729,22 @@ def report(action: str, path: Path, detail: str = "") -> None:
     print(f"{action:>12}  {tilde(path)}{'  ' + detail if detail else ''}")
 
 
-def install_config(dry: bool) -> None:
-    """Teach ais's own config how claude names conversations."""
+def install_config(harness: str, block: str, dry: bool) -> None:
+    """Teach ais's own config how a harness names conversations."""
     load_config()  # writes the starter config when there is none
     text = CONFIG_PATH.read_text()
+    table = f"[harness.{harness}.session]"
     # The starter config ships the table commented out as documentation, so
     # only a live one counts as already installed.
-    if re.search(r"^\s*\[harness\.claude\.session\]", text, re.MULTILINE):
-        report("unchanged", CONFIG_PATH, "[harness.claude.session] already set")
+    if re.search(rf"^\s*{re.escape(table)}", text, re.MULTILINE):
+        report("unchanged", CONFIG_PATH, f"{table} already set")
         return
     if dry:
-        report("would add", CONFIG_PATH, "[harness.claude.session]")
+        report("would add", CONFIG_PATH, table)
         return
     backup(CONFIG_PATH, dry)
-    CONFIG_PATH.write_text(text.rstrip("\n") + "\n" + CLAUDE_SESSION_CONFIG)
-    report("added", CONFIG_PATH, "[harness.claude.session]")
+    CONFIG_PATH.write_text(text.rstrip("\n") + "\n" + block)
+    report("added", CONFIG_PATH, table)
 
 
 def install_hook(dry: bool, force: bool) -> None:
@@ -1719,15 +1799,57 @@ def install_hook(dry: bool, force: bool) -> None:
     report("wired", path, f"SessionStart -> {command}")
 
 
-def install_claude_md(dry: bool) -> None:
-    """Put the house rules for a session in CLAUDE.md, inside ais's markers."""
-    path = claude_dir() / "CLAUDE.md"
-    block = f"{CLAUDE_MD_BEGIN}\n{CLAUDE_MD_SECTION}{CLAUDE_MD_END}\n"
+def pi_extension() -> str:
+    return (
+        PI_EXTENSION
+        .replace("{marker}", PI_EXTENSION_MARKER)
+        .replace("{ais}", json.dumps(ais_command()))
+    )
+
+
+def install_extension(dry: bool, force: bool) -> None:
+    """Drop the extension that tells ais which pi session is running.
+
+    pi has no hook table to wire into, but its extensions are handed
+    session_start — fired on startup and again on /new, /resume, /fork and
+    /clone, the same set of moments claude's SessionStart covers, and for the
+    same reason.
+
+    The whole file is ais's, so it is rewritten whenever its content moves on —
+    there is nothing in it for anyone else to keep. A file of that name ais did
+    not write belongs to someone else, and --force is the only way past it.
+    """
+    path = pi_dir() / "extensions" / "ais.ts"
+    wanted = pi_extension()
+    existing = path.read_text() if path.exists() else None
+    detail = "session_start -> ais _session-seen"
+
+    if existing == wanted:
+        report("unchanged", path, "session_start extension already current")
+        return
+    if existing is not None and PI_EXTENSION_MARKER not in existing and not force:
+        report("check", path, "ais did not write this file (--force overwrites it)")
+        return
+    if dry:
+        report("would write" if existing is None else "would rewrite", path, detail)
+        return
+    backup(path, dry)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(wanted)
+    report("wrote" if existing is None else "rewrote", path, detail)
+
+
+def install_instructions(harness: str, path: Path, dry: bool) -> None:
+    """Put the house rules for a session in the harness's global instructions.
+
+    Inside ais's markers, so the rest of the file is the user's to write.
+    """
+    block = f"{SECTION_BEGIN}\n{instructions(harness)}{SECTION_END}\n"
     text = path.read_text() if path.exists() else ""
 
-    if CLAUDE_MD_BEGIN in text and CLAUDE_MD_END in text:
-        head, rest = text.split(CLAUDE_MD_BEGIN, 1)
-        _, tail = rest.split(CLAUDE_MD_END, 1)
+    if SECTION_BEGIN in text and SECTION_END in text:
+        head, rest = text.split(SECTION_BEGIN, 1)
+        _, tail = rest.split(SECTION_END, 1)
         updated = head + block + tail.lstrip("\n")
         action = "unchanged" if updated == text else "replaced"
     else:
@@ -1743,25 +1865,47 @@ def install_claude_md(dry: bool) -> None:
     backup(path, dry)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(updated)
-    report(action, path, f"ais section ({CLAUDE_MD_BEGIN} … {CLAUDE_MD_END})")
+    report(action, path, f"ais section ({SECTION_BEGIN} … {SECTION_END})")
+
+
+# Everything "ais install" needs to know about a harness: the config block that
+# teaches restart how to resume it, how it is made to report the conversation it
+# is in, where its global instructions live, and — for the closing note — when a
+# harness already running picks the wiring up.
+HARNESSES = {
+    "claude": {
+        "config": CLAUDE_SESSION_CONFIG,
+        "teach": install_hook,
+        "instructions": lambda: claude_dir() / "CLAUDE.md",
+        "refreshed_at": "/clear, /compact or restart",
+    },
+    "pi": {
+        "config": PI_SESSION_CONFIG,
+        "teach": install_extension,
+        "instructions": lambda: pi_dir() / "AGENTS.md",
+        "refreshed_at": "/new, /resume, /fork or restart",
+    },
+}
 
 
 def cmd_install(args):
     """Wire a harness up for session tracking and restart."""
-    if args.harness != "claude":
-        die(f"{PROG} install only knows how to wire up claude so far")
+    spec = HARNESSES.get(args.harness)
+    if spec is None:
+        known = " or ".join(sorted(HARNESSES))
+        die(f"{PROG} install knows how to wire up {known}, not {args.harness!r}")
     if not shutil.which(args.harness):
         note(f"{args.harness} is not on PATH; installing the configuration anyway")
 
-    install_config(args.dry_run)
-    install_hook(args.dry_run, args.force)
-    install_claude_md(args.dry_run)
+    install_config(args.harness, spec["config"], args.dry_run)
+    spec["teach"](args.dry_run, args.force)
+    install_instructions(args.harness, spec["instructions"](), args.dry_run)
 
     if not args.dry_run:
         print()
         sys.stdout.flush()  # keep the note under the report, not above it
-        note("new claude sessions will record their conversation id; "
-             "existing ones pick it up at the next /clear, /compact or restart")
+        note(f"new {args.harness} sessions will record their conversation id; "
+             f"existing ones pick it up at the next {spec['refreshed_at']}")
     return 0
 
 
@@ -1785,6 +1929,7 @@ USAGE = f"""usage: {PROG} [options] -- <harness> [harness args...]
 
 run:
   {PROG} -- claude                     start claude in a tracked session
+  {PROG} -- pi                         ...or pi, or any harness in config.toml
   {PROG} -d "fix the auth bug" -- claude
   -d, --description TEXT             what this session is for; shown by select
   -n, --dry-run                      print the command and env, run nothing
@@ -1811,11 +1956,15 @@ commands:
                    Keeps its directory and name, gets a new ais id.
                    --fresh starts a new conversation, -n/--dry-run shows the
                    command without running it.
-  install          wire a harness up: session flags in config.toml for restart,
-                   a SessionStart hook in ~/.claude/settings.json, and a section
-                   in ~/.claude/CLAUDE.md telling the agent how to use ais from
-                   inside a session. --harness NAME (default claude),
-                   -n/--dry-run, --force to rewrite an existing hook.
+  install          wire a harness up: session flags in config.toml so restart
+                   can resume it, whatever that harness needs in order to report
+                   the conversation it is in — a SessionStart hook in
+                   ~/.claude/settings.json for claude, a session_start extension
+                   in ~/.pi/agent/extensions/ais.ts for pi — and a section in its
+                   global instructions (~/.claude/CLAUDE.md, ~/.pi/agent/AGENTS.md)
+                   telling the agent how to use ais from inside a session.
+                   --harness claude|pi (default claude), -n/--dry-run,
+                   --force to rewrite wiring ais did not write itself.
   prune [--all]    drop dead sessions older than --days (default 7)
 
 tmux:

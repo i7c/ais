@@ -8,19 +8,30 @@ back to isn't worth recording.
 ## Install
 
 ```
-./ais install
+./ais install                # claude
+./ais install --harness pi   # pi
 ```
 
-Wires up a harness (default `claude`): adds its flags to `~/.ais/config.toml`,
-a `SessionStart` hook in `~/.claude/settings.json`, and a section in
-`~/.claude/CLAUDE.md` telling the agent how to use `ais` from inside a
-session. Use `--harness NAME`, `-n/--dry-run` to preview, `--force` to rewrite
-an existing hook.
+Wires a harness up three ways: session flags in `~/.ais/config.toml` so
+`restart` can resume a conversation, something that tells `ais` which
+conversation the harness is in now, and a section in the harness's global
+instructions telling the agent how to use `ais` from inside a session.
+
+| Harness | Reports its conversation through | Instructions land in |
+|---|---|---|
+| `claude` | a `SessionStart` hook in `~/.claude/settings.json` | `~/.claude/CLAUDE.md` |
+| `pi` | a `session_start` extension at `~/.pi/agent/extensions/ais.ts` | `~/.pi/agent/AGENTS.md` |
+
+The instructions are one shared text; only the sentences naming the harness
+differ. They go between `<!-- ais:begin -->` and `<!-- ais:end -->`, so a later
+install replaces its own section and nothing else. `-n/--dry-run` previews,
+`--force` rewrites wiring `ais` did not write itself.
 
 ## Starting a session
 
 ```
 ais -d "fix the auth bug" -- claude
+ais -d "port the parser" -- pi --thinking high
 ```
 
 - `-d, --description TEXT` — what the session is for; shown by `select`
@@ -43,6 +54,9 @@ ais -d "fix the auth bug" -- claude
 
 - `~/.ais/config.toml` — per-harness flags/env, `[tmux]` and `[notify]` settings
 - `~/.ais/sessions.json` — session state
+
+Anything else is the harness's own: `ais install` touches `~/.claude/` or
+`~/.pi/agent/` and backs up every file it changes as `<name>.ais.bak`.
 
 ## tmux integration
 

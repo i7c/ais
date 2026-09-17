@@ -15,6 +15,7 @@ import json
 import os
 import subprocess
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -106,7 +107,26 @@ class SessionConfig(unittest.TestCase):
         self.assertEqual(conf["conflicts"], ["--resume", "--session-id", "-c"])
 
     def test_absent_table_is_not_an_error(self):
-        self.assertIsNone(ais.session_settings(None, "pi.dev"))
+        self.assertIsNone(ais.session_settings(None, "aider"))
+
+    def test_the_shipped_tables_are_valid(self):
+        """Every block "ais install" writes has to survive being read back."""
+        for harness, block in (
+            ("claude", ais.CLAUDE_SESSION_CONFIG), ("pi", ais.PI_SESSION_CONFIG),
+        ):
+            table = tomllib.loads(block)["harness"][harness]["session"]
+            conf = ais.session_settings(table, harness)
+            self.assertIn("--session-id", conf["conflicts"])
+            self.assertTrue(conf["new"] and conf["resume"])
+
+    def test_pi_reopens_with_the_flag_it_was_created_with(self):
+        """pi's --session-id creates when there is none and opens when there is,
+        so new and resume are the same flag and restart still lands."""
+        table = tomllib.loads(ais.PI_SESSION_CONFIG)["harness"]["pi"]["session"]
+        conf = ais.session_settings(table, "pi")
+        self.assertEqual(ais.session_argv(conf["resume"], "abc"), ["--session-id", "abc"])
+        for typed in ("-c", "--continue", "-r", "--resume", "--session", "--fork"):
+            self.assertEqual(ais.names_a_session([typed], conf["conflicts"]), typed)
 
     def test_id_kind_is_checked(self):
         with self.assertRaises(SystemExit):
@@ -329,41 +349,190 @@ class RenameSetting(unittest.TestCase):
             ais.rename_window_setting({"tmux": {"rename": "off"}})
 
 
-class ClaudeMdBlock(unittest.TestCase):
-    """install must own its own section and nothing else in the file."""
+class Quietly(unittest.TestCase):
+    """Base for the install tests: they are about the files, not the report."""
 
     def setUp(self):
+        self.real_report = ais.report
+        ais.report = lambda *a, **k: None
+
+    def tearDown(self):
+        ais.report = self.real_report
+
+
+class InstructionsBlock(Quietly):
+    """install must own its own section and nothing else in the file.
+
+    Same markers, same code, two files: ~/.claude/CLAUDE.md for claude and
+    ~/.pi/agent/AGENTS.md for pi.
+    """
+
+    def setUp(self):
+        super().setUp()
         self.tmp = tempfile.TemporaryDirectory()
         os.environ["CLAUDE_CONFIG_DIR"] = self.tmp.name
+        os.environ["PI_CODING_AGENT_DIR"] = self.tmp.name
         self.path = Path(self.tmp.name) / "CLAUDE.md"
 
     def tearDown(self):
+        super().tearDown()
         del os.environ["CLAUDE_CONFIG_DIR"]
+        del os.environ["PI_CODING_AGENT_DIR"]
         self.tmp.cleanup()
+
+    def install(self, harness="claude", dry=False):
+        ais.install_instructions(harness, self.path, dry)
 
     def test_appends_after_existing_notes(self):
         self.path.write_text("# My notes\n\nkeep me\n")
-        ais.install_claude_md(dry=False)
+        self.install()
         text = self.path.read_text()
         self.assertIn("keep me", text)
-        self.assertIn(ais.CLAUDE_MD_BEGIN, text)
-        self.assertTrue(text.rstrip().endswith(ais.CLAUDE_MD_END))
+        self.assertIn(ais.SECTION_BEGIN, text)
+        self.assertTrue(text.rstrip().endswith(ais.SECTION_END))
 
     def test_replaces_only_its_own_block(self):
         self.path.write_text(
-            f"before\n\n{ais.CLAUDE_MD_BEGIN}\nstale text\n{ais.CLAUDE_MD_END}\n\nafter\n"
+            f"before\n\n{ais.SECTION_BEGIN}\nstale text\n{ais.SECTION_END}\n\nafter\n"
         )
-        ais.install_claude_md(dry=False)
+        self.install()
         text = self.path.read_text()
         self.assertNotIn("stale text", text)
         self.assertIn("before", text)
         self.assertIn("after", text)
-        self.assertEqual(text.count(ais.CLAUDE_MD_BEGIN), 1)
+        self.assertEqual(text.count(ais.SECTION_BEGIN), 1)
 
     def test_dry_run_writes_nothing(self):
         self.path.write_text("untouched\n")
-        ais.install_claude_md(dry=True)
+        self.install(dry=True)
         self.assertEqual(self.path.read_text(), "untouched\n")
+
+    def test_a_harness_switch_replaces_the_section(self):
+        """The same markers, so re-pointing a file at another harness is a
+        replacement, not a second copy."""
+        self.install("claude")
+        self.install("pi")
+        text = self.path.read_text()
+        self.assertEqual(text.count(ais.SECTION_BEGIN), 1)
+        self.assertIn("`ais -- pi`", text)
+        self.assertNotIn("`ais -- claude`", text)
+
+    def test_pi_is_where_install_puts_it(self):
+        self.assertEqual(ais.HARNESSES["pi"]["instructions"](), Path(self.tmp.name) / "AGENTS.md")
+        self.assertEqual(ais.HARNESSES["claude"]["instructions"](), Path(self.tmp.name) / "CLAUDE.md")
+
+
+class RenderedInstructions(unittest.TestCase):
+    """One text, two harnesses: only the sentences that name one may differ."""
+
+    def test_each_harness_is_told_its_own_name(self):
+        for harness in ("claude", "pi"):
+            rendered = ais.instructions(harness)
+            self.assertIn(f"normally `{harness}`", rendered)
+            self.assertIn(f"no `ais -- {harness}`", rendered)
+            self.assertNotIn("{harness}", rendered)
+            self.assertNotIn("{notify_lead}", rendered)
+
+    def test_only_claude_is_warned_off_its_own_notifier(self):
+        # pi has no LLM-callable notification tool to be warned off.
+        self.assertIn("built-in\nnotification tool", ais.instructions("claude"))
+        self.assertNotIn("notification tool", ais.instructions("pi"))
+
+    def test_the_rules_themselves_are_shared(self):
+        shared = "NEVER run `ais select`"
+        self.assertIn(shared, ais.instructions("claude"))
+        self.assertIn(shared, ais.instructions("pi"))
+
+
+class PiExtension(Quietly):
+    """pi has no hook table, so ais owns a file in its extensions directory."""
+
+    def setUp(self):
+        super().setUp()
+        self.tmp = tempfile.TemporaryDirectory()
+        os.environ["PI_CODING_AGENT_DIR"] = self.tmp.name
+        self.path = Path(self.tmp.name) / "extensions" / "ais.ts"
+
+    def tearDown(self):
+        super().tearDown()
+        del os.environ["PI_CODING_AGENT_DIR"]
+        self.tmp.cleanup()
+
+    def test_writes_the_extension(self):
+        ais.install_extension(dry=False, force=False)
+        text = self.path.read_text()
+        self.assertIn("session_start", text)
+        self.assertIn("_session-seen", text)
+        self.assertIn(ais.PI_EXTENSION_MARKER, text)
+
+    def test_dry_run_writes_nothing(self):
+        ais.install_extension(dry=True, force=False)
+        self.assertFalse(self.path.exists())
+
+    def test_rewrites_its_own_file_when_it_moves_on(self):
+        ais.install_extension(dry=False, force=False)
+        self.path.write_text(self.path.read_text().replace("detached: true", "detached: false"))
+        ais.install_extension(dry=False, force=False)
+        self.assertEqual(self.path.read_text(), ais.pi_extension())
+
+    def test_leaves_a_file_it_did_not_write_alone(self):
+        self.path.parent.mkdir(parents=True)
+        self.path.write_text("// someone else's extension\n")
+        ais.install_extension(dry=False, force=False)
+        self.assertEqual(self.path.read_text(), "// someone else's extension\n")
+
+    def test_force_takes_a_foreign_file_over(self):
+        self.path.parent.mkdir(parents=True)
+        self.path.write_text("// someone else's extension\n")
+        ais.install_extension(dry=False, force=True)
+        self.assertEqual(self.path.read_text(), ais.pi_extension())
+        self.assertIn("someone else", self.path.with_name("ais.ts.ais.bak").read_text())
+
+    def test_the_ais_it_calls_is_quoted_for_javascript(self):
+        # A path with a space in it would otherwise end the string literal.
+        real = ais.ais_command
+        ais.ais_command = lambda: "/Applications/My Tools/ais"
+        try:
+            self.assertIn('spawn("/Applications/My Tools/ais"', ais.pi_extension())
+        finally:
+            ais.ais_command = real
+
+
+class InstallConfig(Quietly):
+    """The session table goes in once, whichever harness asks for it."""
+
+    def setUp(self):
+        super().setUp()
+        self.tmp = tempfile.TemporaryDirectory()
+        os.environ["AIS_HOME"] = self.tmp.name
+        self.real = ais.AIS_HOME, ais.CONFIG_PATH
+        ais.AIS_HOME = Path(self.tmp.name)
+        ais.CONFIG_PATH = ais.AIS_HOME / "config.toml"
+
+    def tearDown(self):
+        super().tearDown()
+        ais.AIS_HOME, ais.CONFIG_PATH = self.real
+        del os.environ["AIS_HOME"]
+        self.tmp.cleanup()
+
+    def test_adds_then_leaves_alone(self):
+        ais.install_config("pi", ais.PI_SESSION_CONFIG, dry=False)
+        once = ais.CONFIG_PATH.read_text()
+        self.assertIn("[harness.pi.session]", once)
+        ais.install_config("pi", ais.PI_SESSION_CONFIG, dry=False)
+        self.assertEqual(ais.CONFIG_PATH.read_text(), once)
+
+    def test_the_starter_config_does_not_count_as_installed(self):
+        """It ships the table commented out as documentation."""
+        ais.install_config("claude", ais.CLAUDE_SESSION_CONFIG, dry=False)
+        self.assertIn('resume = ["--resume", "{id}"]', ais.CONFIG_PATH.read_text())
+
+    def test_both_harnesses_can_be_wired_up_at_once(self):
+        ais.install_config("claude", ais.CLAUDE_SESSION_CONFIG, dry=False)
+        ais.install_config("pi", ais.PI_SESSION_CONFIG, dry=False)
+        config = tomllib.loads(ais.CONFIG_PATH.read_text())
+        self.assertEqual(config["harness"]["claude"]["session"]["resume"], ["--resume", "{id}"])
+        self.assertEqual(config["harness"]["pi"]["session"]["resume"], ["--session-id", "{id}"])
 
 
 if __name__ == "__main__":
