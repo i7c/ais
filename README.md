@@ -31,10 +31,13 @@ install replaces its own section and nothing else. `-n/--dry-run` previews,
 
 ```
 ais -d "fix the auth bug" -- claude
-ais -d "port the parser" -- pi --thinking high
+ais -w -d "port the parser" -- pi --thinking high
 ```
 
 - `-d, --description TEXT` — what the session is for; shown by `select`
+- `-w, --worktree` — give the session its own git worktree of the repo you're
+  standing in, and start the harness there (see below). Fails if you're not in
+  a repo.
 - `-n, --dry-run` — print the command and env, run nothing
 
 ## Commands
@@ -47,12 +50,49 @@ ais -d "port the parser" -- pi --thinking high
 | `notify TEXT` | Raise a desktop notification and record it. Skipped (but still recorded) if this session's pane is already on screen; `-f/--force` sends anyway. `-t/--title`, `--tag`, `-q/--quiet`. |
 | `current` | Show the session this shell is running in. |
 | `name [--set N]` | Print (or set) this session's stable base name, for worktrees/branches. |
-| `restart [id]` | Re-run a dead session's harness in this pane, resuming its conversation. Keeps directory and name, gets a new ais id. `--fresh` for a new conversation. |
-| `prune [--all]` | Drop dead sessions older than `--days` (default 7). |
+| `restart [id]` | Re-run a dead session's harness in this pane, resuming its conversation. Keeps directory, name and worktree, gets a new ais id. `--fresh` for a new conversation. |
+| `wt <cmd>` | This session's worktrees: `add [repo]`, `ls [-a]`, `path [repo]`, `prune`. |
+| `prune [--all]` | Drop dead sessions older than `--days` (default 7), and the finished worktrees of the ones it drops. `--keep-worktrees` to leave those alone. |
+
+## Worktrees
+
+One session, one directory — however many repos it turns out to need.
+
+```
+ais -w -d "fix the auth bug" -- claude   # starts in ~/wt/fix-auth-bug/<repo>
+```
+
+Everything that session makes lands under `~/wt/<session name>/`, one
+subdirectory per repo, all on a branch named after the session — so the
+directory, the branch and `ais name` always agree, and two sessions never share
+a checkout. The agent gets `$AIS_WORKTREE` and `$AIS_WORKTREE_BASE`, and reaches
+for another repo through `ais wt`:
+
+```
+cd "$(ais wt add ~/git/other-repo)"   # prints the path, and only the path
+ais wt ls                             # branch and state of each one
+ais wt path other-repo
+ais wt prune                          # drop registrations for worktrees already gone
+```
+
+`ais prune` eventually removes the worktrees of the dead sessions it drops, but
+never one holding uncommitted changes or unpushed commits, and never one a
+surviving session is still standing in.
+
+This replaces the standalone `wt` script. Configure it under `[worktree]`:
+
+```toml
+[worktree]
+base = "~/wt"
+copy = [".env", ".claude/settings.local.json"]   # untracked files a checkout needs
+fetch = true
+```
+
+`$AIS_WT_BASE` overrides `base` for a single run.
 
 ## Files
 
-- `~/.ais/config.toml` — per-harness flags/env, `[tmux]` and `[notify]` settings
+- `~/.ais/config.toml` — per-harness flags/env, `[worktree]`, `[tmux]`, `[notify]`
 - `~/.ais/sessions.json` — session state
 
 Anything else is the harness's own: `ais install` touches `~/.claude/` or

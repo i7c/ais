@@ -10,7 +10,10 @@ without spawning real harness processes. Here the ancestry is handed in.
 
 from __future__ import annotations
 
+import argparse
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import subprocess
@@ -443,6 +446,13 @@ class RenderedInstructions(unittest.TestCase):
         self.assertIn(shared, ais.instructions("claude"))
         self.assertIn(shared, ais.instructions("pi"))
 
+    def test_every_harness_is_told_to_use_wt_and_to_commit_often(self):
+        for harness in ("claude", "pi"):
+            rendered = ais.instructions(harness)
+            self.assertIn("ais wt add", rendered)
+            self.assertIn("do not run `git worktree` yourself", rendered)
+            self.assertIn("Commit often", rendered)
+
 
 class PiExtension(Quietly):
     """pi has no hook table, so ais owns a file in its extensions directory."""
@@ -533,6 +543,335 @@ class InstallConfig(Quietly):
         config = tomllib.loads(ais.CONFIG_PATH.read_text())
         self.assertEqual(config["harness"]["claude"]["session"]["resume"], ["--resume", "{id}"])
         self.assertEqual(config["harness"]["pi"]["session"]["resume"], ["--session-id", "{id}"])
+
+
+class WorktreeSettings(unittest.TestCase):
+    def tearDown(self):
+        os.environ.pop("AIS_WT_BASE", None)
+
+    def test_the_default_base_is_wt_in_the_home_directory(self):
+        self.assertEqual(ais.worktree_settings({})["base"], Path.home() / "wt")
+        self.assertEqual(ais.worktree_settings({"worktree": {}})["fetch"], True)
+        self.assertEqual(ais.worktree_settings({})["copy"], [])
+
+    def test_config_sets_the_base_and_expands_it(self):
+        got = ais.worktree_settings({"worktree": {"base": "~/elsewhere"}})
+        self.assertEqual(got["base"], Path.home() / "elsewhere")
+
+    def test_the_environment_beats_the_config(self):
+        os.environ["AIS_WT_BASE"] = "/tmp/somewhere"
+        got = ais.worktree_settings({"worktree": {"base": "~/elsewhere"}})
+        self.assertEqual(got["base"], Path("/tmp/somewhere"))
+
+    def test_copy_takes_a_bare_string_too(self):
+        self.assertEqual(ais.worktree_settings({"worktree": {"copy": ".env"}})["copy"], [".env"])
+
+    def test_nonsense_is_refused(self):
+        for table in ({"base": 7}, {"copy": [1]}, {"fetch": "yes"}):
+            with self.assertRaises(SystemExit):
+                ais.worktree_settings({"worktree": table})
+
+
+class Repo:
+    """A throwaway repo with an origin, so branching has something to track.
+
+    .env is present and gitignored, like the real thing: worktree.copy exists
+    for files git is not carrying, and a copied file that git *would* carry
+    would leave every new worktree dirty.
+    """
+
+    def __init__(self, parent: Path, name: str):
+        self.origin = parent / f"{name}.git"
+        self.path = (parent / f"{name}-checkout").resolve()  # deliberately not <name>
+        subprocess.run(["git", "init", "--quiet", "--bare", "-b", "main", str(self.origin)], check=True)
+        subprocess.run(["git", "clone", "--quiet", str(self.origin), str(self.path)], check=True)
+        self.git("config", "user.email", "t@example.com")
+        self.git("config", "user.name", "Test")
+        (self.path / "README").write_text("hello\n")
+        (self.path / ".gitignore").write_text(".env\n")
+        (self.path / ".env").write_text("SECRET=1\n")
+        self.git("add", "README", ".gitignore")
+        self.git("commit", "--quiet", "-m", "first")
+        self.git("push", "--quiet", "-u", "origin", "main")
+
+    def git(self, *args):
+        return subprocess.run(
+            ["git", "-C", str(self.path), *args],
+            check=True, capture_output=True, text=True,
+        )
+
+
+class WorktreeBasics(unittest.TestCase):
+    """The git-facing half: real repos, because nothing else proves this works."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.repo = Repo(self.root, "widget")
+        self.base = self.root / "wt"
+        self.settings = {"base": self.base, "copy": [".env"], "fetch": False}
+        self.real_note = ais.note
+        ais.note = lambda *a, **k: None
+
+    def tearDown(self):
+        ais.note = self.real_note
+        self.tmp.cleanup()
+
+    def make(self, name="fix-the-thing", repo=None):
+        return ais.ensure_worktree(
+            (repo or self.repo).path, self.base / name / "widget", name, self.settings
+        )
+
+    def test_the_repo_is_named_after_its_origin_not_its_directory(self):
+        self.assertEqual(ais.repo_name(self.repo.path), "widget")
+
+    def test_a_repo_without_an_origin_falls_back_to_its_directory(self):
+        self.repo.git("remote", "remove", "origin")
+        self.assertEqual(ais.repo_name(self.repo.path), "widget-checkout")
+
+    def test_repo_root_is_the_main_checkout_even_from_inside_a_worktree(self):
+        dest = self.make()
+        self.assertEqual(ais.repo_root(dest), self.repo.path)
+        self.assertIsNone(ais.repo_root(self.root))
+
+    def test_a_new_worktree_lands_on_a_branch_of_the_session_name(self):
+        dest = self.make()
+        self.assertEqual(dest, self.base / "fix-the-thing" / "widget")
+        self.assertTrue(ais.is_worktree(dest))
+        self.assertEqual(ais.worktree_branch(dest), "fix-the-thing")
+        self.assertEqual((dest / "README").read_text(), "hello\n")
+
+    def test_configured_files_are_carried_across(self):
+        self.assertEqual((self.make() / ".env").read_text(), "SECRET=1\n")
+
+    def test_an_existing_worktree_is_reused_not_refused(self):
+        first = self.make()
+        (first / "scratch").write_text("mine\n")
+        self.assertEqual(self.make(), first)
+        self.assertEqual((first / "scratch").read_text(), "mine\n")
+
+    def test_something_in_the_way_that_is_not_a_worktree_is_fatal(self):
+        (self.base / "taken").mkdir(parents=True)
+        (self.base / "taken" / "widget").mkdir()
+        with self.assertRaises(SystemExit):
+            self.make("taken")
+
+    def test_several_repos_share_one_session_directory(self):
+        other = Repo(self.root, "gadget")
+        self.make()
+        ais.ensure_worktree(
+            other.path, self.base / "fix-the-thing" / "gadget", "fix-the-thing", self.settings
+        )
+        found = ais.session_worktrees(self.base / "fix-the-thing")
+        self.assertEqual([p.name for p in found], ["gadget", "widget"])
+        self.assertEqual({ais.worktree_branch(p) for p in found}, {"fix-the-thing"})
+
+    def test_state_reports_what_would_be_lost(self):
+        dest = self.make()
+        self.assertEqual(ais.worktree_state(dest), "")
+        (dest / "README").write_text("changed\n")
+        self.assertEqual(ais.worktree_state(dest), "dirty")
+        subprocess.run(["git", "-C", str(dest), "commit", "--quiet", "-am", "wip"], check=True)
+        self.assertEqual(ais.worktree_state(dest), "+1 unpushed")
+
+    def test_removing_takes_the_branch_with_it_when_git_agrees(self):
+        dest = self.make()
+        self.assertTrue(ais.remove_worktree(dest))
+        self.assertFalse(dest.exists())
+        heads = subprocess.run(
+            ["git", "-C", str(self.repo.path), "branch", "--list", "fix-the-thing"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(heads.stdout.strip(), "")
+
+
+class SessionWorktrees(unittest.TestCase):
+    """The ais-facing half: session records, "ais wt", and what prune may take."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.home = self.root / "ais-home"
+        self.base = self.root / "wt"
+        self.repo = Repo(self.root, "widget")
+
+        self.saved = ais.AIS_HOME, ais.CONFIG_PATH, ais.SESSIONS_PATH, ais.LOCK_PATH
+        ais.AIS_HOME = self.home
+        ais.CONFIG_PATH = self.home / "config.toml"
+        ais.SESSIONS_PATH = self.home / "sessions.json"
+        ais.LOCK_PATH = self.home / "sessions.lock"
+        os.environ["AIS_WT_BASE"] = str(self.base)
+        os.environ["AIS_SESSION"] = "sess000001"
+        self.real_note = ais.note
+        ais.note = lambda *a, **k: None
+
+        self.session = {
+            "id": "sess000001", "slug": "fix-the-thing", "status": "dead",
+            "cwd": str(self.repo.path), "harness": "claude",
+        }
+        ais.mutate_sessions(lambda ss: ss.append(self.session))
+
+    def tearDown(self):
+        ais.note = self.real_note
+        ais.AIS_HOME, ais.CONFIG_PATH, ais.SESSIONS_PATH, ais.LOCK_PATH = self.saved
+        os.environ.pop("AIS_WT_BASE", None)
+        os.environ.pop("AIS_SESSION", None)
+        self.tmp.cleanup()
+
+    def settings(self):
+        return {"base": self.base, "copy": [], "fetch": False}
+
+    def stored(self):
+        return next(s for s in ais.read_sessions() if s["id"] == "sess000001")
+
+    def add(self, repo=None):
+        args = argparse.Namespace(subcommand="add", repo=str((repo or self.repo).path), all=False)
+        with contextlib.redirect_stdout(io.StringIO()):  # add prints the path
+            return ais.cmd_wt(args)
+
+    # -- naming ----------------------------------------------------------
+
+    def test_the_directory_is_the_session_name_and_falls_back_to_the_id(self):
+        self.assertEqual(ais.session_dirname(self.session), "fix-the-thing")
+        self.assertEqual(ais.session_dirname({"id": "abc", "slug": ""}), "abc")
+
+    def test_the_base_is_derived_until_a_worktree_records_it(self):
+        self.assertEqual(
+            ais.session_worktree_base(self.session, self.settings()),
+            self.base / "fix-the-thing",
+        )
+        self.assertEqual(
+            ais.session_worktree_base({"worktree": {"base": "/elsewhere/x"}}, self.settings()),
+            Path("/elsewhere/x"),
+        )
+
+    # -- -w at session start ---------------------------------------------
+
+    def test_a_started_session_is_moved_into_its_worktree(self):
+        session = dict(self.session)
+        ais.make_session_worktree(
+            session, {"root": str(self.repo.path), "repo": "widget"}, self.settings()
+        )
+        dest = self.base / "fix-the-thing" / "widget"
+        self.assertEqual(session["cwd"], str(dest))
+        self.assertEqual(self.stored()["cwd"], str(dest))
+        self.assertEqual(
+            self.stored()["worktree"],
+            {"base": str(self.base / "fix-the-thing"), "initial": str(dest),
+             "branch": "fix-the-thing"},
+        )
+
+    def test_a_session_that_cannot_get_its_worktree_is_closed_off(self):
+        (self.base / "fix-the-thing" / "widget").mkdir(parents=True)
+        with self.assertRaises(SystemExit):
+            ais.make_session_worktree(
+                dict(self.session), {"root": str(self.repo.path), "repo": "widget"},
+                self.settings(),
+            )
+        self.assertEqual(self.stored()["exit_code"], 1)
+
+    # -- ais wt ----------------------------------------------------------
+
+    def test_add_records_the_base_without_claiming_to_be_the_initial_one(self):
+        self.add()
+        rec = self.stored()["worktree"]
+        self.assertEqual(rec["base"], str(self.base / "fix-the-thing"))
+        self.assertNotIn("initial", rec)
+        self.assertEqual(self.stored()["cwd"], str(self.repo.path))
+
+    def test_add_refuses_something_that_is_not_a_repo(self):
+        with self.assertRaises(SystemExit):
+            self.add(argparse.Namespace(path=self.root))  # no .git anywhere
+
+    def test_add_outside_a_session_says_so(self):
+        del os.environ["AIS_SESSION"]
+        with self.assertRaises(SystemExit):
+            self.add()
+
+    def test_every_repo_the_session_adds_lands_in_one_directory(self):
+        other = Repo(self.root, "gadget")
+        self.add()
+        self.add(other)
+        found = ais.session_worktrees(self.base / "fix-the-thing")
+        self.assertEqual([p.name for p in found], ["gadget", "widget"])
+
+    def test_path_names_the_initial_worktree_then_any_other(self):
+        ais.make_session_worktree(
+            dict(self.session), {"root": str(self.repo.path), "repo": "widget"}, self.settings()
+        )
+        self.add(Repo(self.root, "gadget"))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            ais.cmd_wt(argparse.Namespace(subcommand="path", repo=None, all=False))
+            ais.cmd_wt(argparse.Namespace(subcommand="path", repo="gadget", all=False))
+        lines = out.getvalue().split()
+        self.assertEqual(lines[0], str(self.base / "fix-the-thing" / "widget"))
+        self.assertEqual(lines[1], str(self.base / "fix-the-thing" / "gadget"))
+
+    def test_path_refuses_a_repo_this_session_never_took(self):
+        self.add()
+        with self.assertRaises(SystemExit):
+            ais.cmd_wt(argparse.Namespace(subcommand="path", repo="nope", all=False))
+
+    def test_ls_shows_this_session_and_marks_the_one_it_started_in(self):
+        ais.make_session_worktree(
+            dict(self.session), {"root": str(self.repo.path), "repo": "widget"}, self.settings()
+        )
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            ais.cmd_wt(argparse.Namespace(subcommand="ls", repo=None, all=False))
+        line = out.getvalue().strip()
+        self.assertTrue(line.startswith("*"))
+        self.assertIn("fix-the-thing/widget", line)
+        self.assertIn("fix-the-thing", line.split()[2])
+
+    def test_an_unknown_subcommand_is_refused(self):
+        with self.assertRaises(SystemExit):
+            ais.cmd_wt(argparse.Namespace(subcommand="rm", repo=None, all=False))
+
+    # -- prune -----------------------------------------------------------
+
+    def retire(self, dropped, kept=()):
+        ais.retire_worktrees(list(dropped), list(kept))
+
+    def prepared(self):
+        ais.make_session_worktree(
+            self.session, {"root": str(self.repo.path), "repo": "widget"}, self.settings()
+        )
+        return Path(self.session["worktree"]["initial"])
+
+    def test_prune_takes_a_finished_worktree_and_its_directory(self):
+        dest = self.prepared()
+        self.retire([self.session])
+        self.assertFalse(dest.exists())
+        self.assertFalse(dest.parent.exists())
+
+    def test_prune_leaves_uncommitted_work_where_it_is(self):
+        dest = self.prepared()
+        (dest / "README").write_text("half a thought\n")
+        self.retire([self.session])
+        self.assertTrue(dest.exists())
+
+    def test_prune_leaves_unpushed_commits_where_they_are(self):
+        dest = self.prepared()
+        (dest / "README").write_text("done\n")
+        subprocess.run(["git", "-C", str(dest), "commit", "--quiet", "-am", "work"], check=True)
+        self.retire([self.session])
+        self.assertTrue(dest.exists())
+
+    def test_prune_does_not_take_a_worktree_a_restart_still_lives_in(self):
+        """A restart shares its parent's name, and so its directory."""
+        dest = self.prepared()
+        restart = {
+            "id": "sess000002", "slug": "fix-the-thing", "status": "active",
+            "cwd": str(dest), "worktree": dict(self.session["worktree"]),
+        }
+        self.retire([self.session], [restart])
+        self.assertTrue(dest.exists())
+
+    def test_prune_ignores_sessions_that_never_had_one(self):
+        self.retire([{"id": "x", "cwd": str(self.repo.path)}])
+        self.assertTrue((self.repo.path / "README").exists())
 
 
 if __name__ == "__main__":

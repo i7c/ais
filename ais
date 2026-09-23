@@ -43,6 +43,9 @@ ID_ALPHABET = "23456789abcdefghijkmnpqrstuvwxyz"
 ID_LENGTH = 10
 SESSIONS_VERSION = 1
 
+# Where a session's worktrees live, unless config or $AIS_WT_BASE says otherwise.
+WT_BASE = Path.home() / "wt"
+
 # Notifications are kept on the session record: they are only interesting while
 # the session is, and they die with it when prune drops it.
 NOTIFY_KEEP = 20          # per session
@@ -102,6 +105,16 @@ flags = []
 
 # [harness.pi.env]
 # PI_CACHE_RETENTION = "long"
+
+# [worktree] controls "ais -w" and "ais wt". Every worktree a session makes
+# lands under base/<session name>, on a branch named after the session, so one
+# session's work is one directory however many repos it touches.
+[worktree]
+# base = "~/wt"       # where session directories live
+# copy = [".env", ".claude/settings.local.json"]
+                      # paths copied from the main checkout into each new
+                      # worktree, when the checkout has them
+# fetch = true        # "git fetch origin" before branching; false to work offline
 
 # [tmux] controls what a session does to the pane it runs in.
 [tmux]
@@ -181,6 +194,39 @@ def harness_settings(config: dict, harness: str) -> dict:
         "command": list(command),
         "session": session_settings(specific.get("session"), harness),
         "rename_window": rename_window_setting(config),
+        "worktree": worktree_settings(config),
+    }
+
+
+def worktree_settings(config: dict) -> dict:
+    """[worktree] — where session worktrees go and what follows them there.
+
+    $AIS_WT_BASE wins over the configured base, so a one-off run can be sent
+    somewhere else without editing the config.
+    """
+    table = config.get("worktree") or {}
+    if not isinstance(table, dict):
+        die("config: [worktree] must be a table")
+
+    base = table.get("base", str(WT_BASE))
+    if not isinstance(base, str):
+        die("config: worktree.base must be a string")
+    base = os.environ.get("AIS_WT_BASE") or base
+
+    copy = table.get("copy") or []
+    if isinstance(copy, str):
+        copy = [copy]
+    if not isinstance(copy, list) or not all(isinstance(c, str) for c in copy):
+        die("config: worktree.copy must be a list of strings")
+
+    fetch = table.get("fetch", True)
+    if not isinstance(fetch, bool):
+        die("config: worktree.fetch must be true or false")
+
+    return {
+        "base": Path(os.path.expanduser(os.path.expandvars(base))),
+        "copy": [c for c in copy if c],
+        "fetch": fetch,
     }
 
 
@@ -727,6 +773,215 @@ def cmd_notify(args):
     return 0 if (delivered or suppress) else 1
 
 
+# ---------------------------------------------------------------- worktrees
+
+def git(*args: str, cwd=None) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["git", *args], cwd=str(cwd) if cwd else None,
+        capture_output=True, text=True,
+    )
+
+
+def repo_root(path) -> Path | None:
+    """The main checkout owning path, or None when path is not in a repo.
+
+    Asks for the *common* dir, so this answers with the main checkout even when
+    called from inside a worktree — which is the normal case once a session is
+    running in one.
+    """
+    if not Path(path).is_dir():
+        return None
+    res = git("-C", str(path), "rev-parse", "--path-format=absolute", "--git-common-dir")
+    if res.returncode != 0:
+        return None
+    common = res.stdout.strip()
+    return Path(common).parent if common else None
+
+
+def repo_name(root: Path) -> str:
+    """What to call this repo's directory inside a session.
+
+    From the origin URL rather than the directory, so a checkout somebody named
+    "mstctl-03" still yields "mstctl" and two sessions agree on the name.
+    """
+    res = git("-C", str(root), "remote", "get-url", "origin")
+    url = res.stdout.strip() if res.returncode == 0 else ""
+    if url:
+        url = url.rstrip("/")
+        if url.endswith(".git"):
+            url = url[: -len(".git")]
+        name = url.rsplit("/", 1)[-1].rsplit(":", 1)[-1]
+        if name:
+            return name
+    return root.name
+
+
+def default_ref(root: Path) -> str:
+    """The ref a new session branch starts from: origin's default branch."""
+    for _ in range(2):
+        res = git("-C", str(root), "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD")
+        ref = res.stdout.strip() if res.returncode == 0 else ""
+        if ref:
+            return ref[len("refs/remotes/"):]
+        git("-C", str(root), "remote", "set-head", "origin", "--auto")
+    for candidate in ("origin/main", "origin/master"):
+        if git("-C", str(root), "rev-parse", "--verify", "--quiet", candidate).returncode == 0:
+            return candidate
+    # No origin at all: a local-only repo still has a HEAD worth branching from.
+    if git("-C", str(root), "rev-parse", "--verify", "--quiet", "HEAD").returncode == 0:
+        return "HEAD"
+    die(f"cannot work out what to branch from in {tilde(root)} (no origin, no commits)")
+
+
+def is_worktree(path: Path) -> bool:
+    """True when path is a checkout: .git is a dir (main) or a file (worktree)."""
+    return (path / ".git").exists()
+
+
+def worktree_branch(path: Path) -> str:
+    res = git("-C", str(path), "branch", "--show-current")
+    return (res.stdout.strip() if res.returncode == 0 else "") or "(detached)"
+
+
+def is_dirty(path: Path) -> bool:
+    res = git("-C", str(path), "status", "--porcelain")
+    return res.returncode == 0 and bool(res.stdout.strip())
+
+
+def unpushed_count(path: Path) -> int:
+    """Commits on HEAD that exist on no remote — unsaved work, in the sense that
+    matters when deciding whether a worktree may be thrown away."""
+    res = git("-C", str(path), "rev-list", "--count", "HEAD", "--not", "--remotes")
+    try:
+        return int(res.stdout.strip()) if res.returncode == 0 else 0
+    except ValueError:
+        return 0
+
+
+def copy_into(root: Path, dest: Path, paths: list[str]) -> None:
+    """Carry the untracked files a checkout needs to be usable (.env and friends)."""
+    for rel in paths:
+        src = root / rel
+        if not src.exists():
+            continue
+        target = dest / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if src.is_dir():
+            shutil.copytree(src, target, dirs_exist_ok=True)
+        else:
+            shutil.copy2(src, target)
+        note(f"copied {rel}")
+
+
+def ensure_worktree(root: Path, dest: Path, branch: str, settings: dict) -> Path:
+    """The worktree at dest, on branch, making it if it is not there yet.
+
+    An existing worktree is reused rather than refused: a restart, a second
+    "ais wt add" for the same repo and a re-run of "-w" all mean "put me where
+    that session works", and the answer to all three is the same directory.
+    """
+    if dest.exists():
+        if is_worktree(dest):
+            note(f"reusing {tilde(dest)} ({worktree_branch(dest)})")
+            return dest
+        die(f"{tilde(dest)} exists and is not a git worktree; move it aside")
+
+    if settings["fetch"]:
+        git("-C", str(root), "fetch", "--quiet", "origin")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+
+    if git("-C", str(root), "show-ref", "--verify", "--quiet", f"refs/heads/{branch}").returncode == 0:
+        note(f"reusing existing local branch {branch}")
+        res = git("-C", str(root), "worktree", "add", str(dest), branch)
+    elif git("-C", str(root), "rev-parse", "--verify", "--quiet", f"origin/{branch}").returncode == 0:
+        note(f"tracking existing origin/{branch}")
+        res = git("-C", str(root), "worktree", "add", "--track", "-b", branch, str(dest), f"origin/{branch}")
+    else:
+        ref = default_ref(root)
+        note(f"new branch {branch} from {ref}")
+        res = git("-C", str(root), "worktree", "add", "-b", branch, str(dest), ref)
+
+    if res.returncode != 0:
+        die(f"git worktree add failed: {res.stderr.strip() or 'unknown error'}")
+
+    copy_into(root, dest, settings["copy"])
+    return dest
+
+
+def session_dirname(session: dict) -> str:
+    """The single path segment a session's worktrees live under.
+
+    The session name, which is also the branch name, so the directory, the
+    branch and "ais name" all say the same thing. A session with no description
+    has no name to use, and falls back to its id.
+    """
+    return session.get("slug") or session.get("id") or ""
+
+
+def session_worktree_base(session: dict, settings: dict) -> Path:
+    """Where this session's worktrees go — recorded if it has any, else derived."""
+    recorded = (session.get("worktree") or {}).get("base")
+    return Path(recorded) if recorded else settings["base"] / session_dirname(session)
+
+
+def record_worktree(sid: str, base: Path, initial: Path | None, branch: str) -> bool:
+    """Remember a session's worktree directory, and its initial worktree if any."""
+    def apply(sessions):
+        target = next((s for s in sessions if s.get("id") == sid), None)
+        if target is None:
+            return False
+        rec = target.get("worktree")
+        if not isinstance(rec, dict):
+            rec = {}
+        rec["base"] = str(base)
+        rec["branch"] = branch
+        if initial is not None:
+            rec["initial"] = str(initial)
+            target["cwd"] = str(initial)
+        target["worktree"] = rec
+        return True
+
+    return mutate_sessions(apply)
+
+
+def session_worktrees(base: Path) -> list[Path]:
+    """Every checkout sitting directly under a session directory."""
+    if not base.is_dir():
+        return []
+    return sorted(d for d in base.iterdir() if d.is_dir() and is_worktree(d))
+
+
+def worktree_state(path: Path) -> str:
+    bits = []
+    if is_dirty(path):
+        bits.append("dirty")
+    ahead = unpushed_count(path)
+    if ahead:
+        bits.append(f"+{ahead} unpushed")
+    return ", ".join(bits)
+
+
+def remove_worktree(path: Path) -> bool:
+    """Drop a worktree and its branch, keeping anything git is unsure about.
+
+    Only ever called on a worktree already found to hold nothing unsaved, so
+    the removal is safe; the branch is a separate judgement and git's own
+    "-d refuses unmerged" is the one that counts.
+    """
+    root = repo_root(path)
+    if root is None:
+        shutil.rmtree(path, ignore_errors=True)
+        return True
+    branch = worktree_branch(path)
+    res = git("-C", str(root), "worktree", "remove", str(path))
+    if res.returncode != 0:
+        note(f"could not remove {tilde(path)}: {res.stderr.strip() or 'git declined'}")
+        return False
+    if branch != "(detached)":
+        git("-C", str(root), "branch", "-d", branch)
+    return True
+
+
 # ---------------------------------------------------------------- run
 
 def cmd_run(args, harness_argv: list[str]):
@@ -736,6 +991,14 @@ def cmd_run(args, harness_argv: list[str]):
     harness = harness_argv[0]
     settings = harness_settings(config, harness)
     harness_args = harness_argv[1:]
+
+    # Before anything is recorded: a "-w" that cannot be honoured must fail
+    # while there is still nothing to clean up.
+    root = None
+    if args.worktree:
+        root = repo_root(os.getcwd())
+        if root is None:
+            die(f"-w needs a git repository; {tilde(os.getcwd())} is not in one")
 
     # Mint the conversation id here rather than discovering it later: known
     # before the child exists, it lands in the record in the same write as
@@ -772,6 +1035,10 @@ def cmd_run(args, harness_argv: list[str]):
         "ended_at": None,
         "exit_code": None,
     }
+    if root is not None:
+        # Acted on by launch, once the session has an id and a name to build
+        # the path out of; never stored on the record.
+        session["worktree_request"] = {"root": str(root), "repo": repo_name(root)}
     return launch(session, argv, settings, dry_run=args.dry_run)
 
 
@@ -786,6 +1053,7 @@ def launch(session: dict, argv: list[str], settings: dict, dry_run: bool) -> int
         die(f"harness not found on PATH: {argv[0]}")
 
     harness = session["harness"]
+    wanted = session.pop("worktree_request", None)
     if dry_run:
         session["id"] = new_id({s.get("id") for s in read_sessions()})
     else:
@@ -799,6 +1067,8 @@ def launch(session: dict, argv: list[str], settings: dict, dry_run: bool) -> int
         candidate = slugify(session.get("description") or "")
         if candidate and not session.get("slug"):
             session["slug"] = store_slug(session["id"], candidate) or candidate
+        if wanted:
+            make_session_worktree(session, wanted, settings["worktree"])
 
     env = os.environ.copy()
     env.update(settings["env"])
@@ -806,6 +1076,11 @@ def launch(session: dict, argv: list[str], settings: dict, dry_run: bool) -> int
     env["AIS_HARNESS"] = harness
     if session.get("description"):
         env["AIS_SESSION_DESCRIPTION"] = session["description"]
+    rec = session.get("worktree") or {}
+    if rec.get("base"):
+        env["AIS_WORKTREE_BASE"] = rec["base"]
+    if rec.get("initial"):
+        env["AIS_WORKTREE"] = rec["initial"]
 
     if dry_run:
         print("session:", session["id"], "(dry run, not recorded)")
@@ -818,6 +1093,10 @@ def launch(session: dict, argv: list[str], settings: dict, dry_run: bool) -> int
             print(f"env:     AIS_SESSION_DESCRIPTION={session['description']}")
         if session.get("session_ids"):
             print(f"{harness}: {session['session_ids'][-1]}")
+        if wanted:
+            name = slugify(session.get("description") or "") or session["id"]
+            planned = settings["worktree"]["base"] / name / wanted["repo"]
+            print("worktree:", tilde(planned), f"(branch {name}, not created)")
         print("cwd:    ", tilde(session["cwd"]))
         print("tmux:   ", tmux_label(session))
         if settings["rename_window"]:
@@ -847,6 +1126,27 @@ def launch(session: dict, argv: list[str], settings: dict, dry_run: bool) -> int
         code = wait_for(child)
     finish(session["id"], code)
     return code
+
+
+def make_session_worktree(session: dict, wanted: dict, wt: dict) -> None:
+    """Put a "-w" session in its own worktree, and move it there.
+
+    Runs after the session is on record, because the path is built out of the
+    name, and the name is only settled once. A failure here leaves a registered
+    session with no harness behind it, so it is closed off before dying.
+    """
+    name = session_dirname(session)
+    base = wt["base"] / name
+    dest = base / wanted["repo"]
+    try:
+        ensure_worktree(Path(wanted["root"]), dest, name, wt)
+    except SystemExit:
+        finish(session["id"], 1)
+        raise
+    session["cwd"] = str(dest)
+    session["worktree"] = {"base": str(base), "initial": str(dest), "branch": name}
+    record_worktree(session["id"], base, dest, name)
+    note(f"working in {tilde(dest)}")
 
 
 def install_forwarding(child: subprocess.Popen):
@@ -1129,6 +1429,7 @@ def cmd_restart(args):
         "id": None,
         "description": target.get("description"),
         "slug": target.get("slug"),  # deliberately shared: same work, same worktree
+        "worktree": target.get("worktree"),  # and literally the same one: cwd is in it
         "harness": harness,
         "command": argv,
         "harness_args": list(harness_args),
@@ -1261,6 +1562,151 @@ def store_slug(sid: str, candidate: str, force: bool = False) -> str | None:
         return name
 
     return mutate_sessions(apply)
+
+
+# ---------------------------------------------------------------- wt
+
+def current_session() -> dict:
+    """The session this process is running in, or die saying why not."""
+    sid = os.environ.get("AIS_SESSION")
+    if not sid:
+        die(f"not inside an ais session; {PROG} wt works on the session's own directory")
+    session = next((s for s in read_sessions() if s.get("id") == sid), None)
+    if session is None:
+        die(f"AIS_SESSION={sid} is not in {tilde(SESSIONS_PATH)}")
+    return session
+
+
+def cmd_wt_add(args):
+    """Give this session a worktree of another repo, beside the ones it has.
+
+    Works whether or not the session was started with -w: a session that finds
+    it needs a second repo halfway through should not have to be restarted to
+    get somewhere safe to put it.
+    """
+    session = current_session()
+    wt = worktree_settings(load_config())
+
+    target = os.path.expanduser(args.repo or ".")  # no argument: the repo we stand in
+    root = repo_root(target)
+    if root is None:
+        die(f"not a git repository: {tilde(Path(target).absolute())}")
+
+    name = session_dirname(session)
+    base = session_worktree_base(session, wt)
+    dest = base / repo_name(root)
+
+    ensure_worktree(root, dest, name, wt)
+    if not record_worktree(session["id"], base, None, name):
+        note(f"session {session['id']} is not on record; worktree not remembered")
+    print(dest)  # stdout is the path alone: cd "$(ais wt add ~/git/foo)"
+    return 0
+
+
+def cmd_wt_ls(args):
+    """This session's worktrees — or every session's, with -a."""
+    wt = worktree_settings(load_config())
+    if args.all:
+        bases = sorted(d for d in wt["base"].iterdir() if d.is_dir()) if wt["base"].is_dir() else []
+        initial = None
+    else:
+        session = current_session()
+        bases = [session_worktree_base(session, wt)]
+        initial = (session.get("worktree") or {}).get("initial")
+
+    rows = 0
+    for base in bases:
+        for path in session_worktrees(base):
+            mark = "*" if initial and str(path) == initial else " "
+            state = worktree_state(path)
+            try:
+                label = str(path.relative_to(wt["base"]))
+            except ValueError:
+                label = tilde(path)  # base moved in config since it was made
+            print(
+                f"{mark} {elide(label, 44):<44} "
+                f"{elide(worktree_branch(path), 30):<30} {state}".rstrip()
+            )
+            rows += 1
+    if not rows:
+        note(
+            f"no worktrees under {tilde(wt['base'])}" if args.all
+            else f"this session has no worktrees ({PROG} wt add <repo> makes one)"
+        )
+    return 0
+
+
+def cmd_wt_path(args):
+    """Print one worktree path, for callers that want to cd rather than read."""
+    session = current_session()
+    wt = worktree_settings(load_config())
+    base = session_worktree_base(session, wt)
+
+    if args.repo:
+        dest = base / args.repo
+        if not is_worktree(dest):
+            die(f"this session has no worktree of {args.repo!r} ({tilde(dest)})")
+        print(dest)
+        return 0
+
+    initial = (session.get("worktree") or {}).get("initial")
+    if initial and is_worktree(Path(initial)):
+        print(initial)
+        return 0
+    found = session_worktrees(base)
+    if not found:
+        die(f"this session has no worktrees ({PROG} wt add <repo> makes one)")
+    if len(found) > 1:
+        names = ", ".join(p.name for p in found)
+        die(f"this session has several worktrees ({names}); name one")
+    print(found[0])
+    return 0
+
+
+def cmd_wt_prune(args):
+    """Drop registrations git still holds for worktrees that are gone.
+
+    Directory-level housekeeping only: it never removes a worktree that is
+    still there. "ais prune" is what retires a dead session's work.
+    """
+    wt = worktree_settings(load_config())
+    if not wt["base"].is_dir():
+        note(f"nothing to prune ({tilde(wt['base'])} does not exist)")
+        return 0
+
+    roots, emptied = [], 0
+    for base in sorted(d for d in wt["base"].iterdir() if d.is_dir()):
+        for path in session_worktrees(base):
+            root = repo_root(path)
+            if root is not None and root not in roots:
+                roots.append(root)
+        try:
+            base.rmdir()
+            emptied += 1
+        except OSError:
+            pass  # not empty, which is the normal case
+
+    for root in roots:
+        git("-C", str(root), "worktree", "prune")
+    note(f"pruned {len(roots)} checkout(s), removed {emptied} empty session director(ies)")
+    return 0
+
+
+WT_COMMANDS = {
+    "add": cmd_wt_add,
+    "ls": cmd_wt_ls,
+    "list": cmd_wt_ls,
+    "path": cmd_wt_path,
+    "prune": cmd_wt_prune,
+}
+
+
+def cmd_wt(args):
+    fn = WT_COMMANDS.get(args.subcommand)
+    if fn is None:
+        known = ", ".join(sorted(set(WT_COMMANDS) - {"list"}))
+        die(f"unknown worktree command {args.subcommand!r}; try one of: {known}")
+    return fn(args)
 
 
 # ---------------------------------------------------------------- select
@@ -1435,6 +1881,8 @@ def cmd_preview(args):
         ("host", session.get("hostname", "?")),
         (session.get("harness", "session"), harness_session_id(session) or "-"),
     ]
+    if (session.get("worktree") or {}).get("base"):
+        fields.append(("worktrees", tilde(session["worktree"]["base"])))
     if session.get("restart_of"):
         fields.append(("restart of", session["restart_of"]))
     desc = (session.get("description") or "").strip()
@@ -1517,13 +1965,13 @@ def cmd_prune(args):
 
     def apply(sessions):
         reap(sessions)
-        keep, dropped = [], 0
+        keep, dropped = [], []
         for s in sessions:
             if s.get("status") == "active":
                 keep.append(s)
                 continue
             if args.all:
-                dropped += 1
+                dropped.append(s)
                 continue
             ended = s.get("ended_at") or s.get("started_at")
             try:
@@ -1531,15 +1979,58 @@ def cmd_prune(args):
             except ValueError:
                 stamp = 0
             if stamp < cutoff:
-                dropped += 1
+                dropped.append(s)
             else:
                 keep.append(s)
         sessions[:] = keep
-        return dropped
+        return dropped, list(keep)
 
-    dropped = mutate_sessions(apply)
-    note(f"pruned {dropped} dead session(s)")
+    dropped, kept = mutate_sessions(apply)
+    note(f"pruned {len(dropped)} dead session(s)")
+    if not args.keep_worktrees:
+        retire_worktrees(dropped, kept)
     return 0
+
+
+def retire_worktrees(dropped: list[dict], kept: list[dict]) -> None:
+    """Take away the worktrees of pruned sessions, but only the finished ones.
+
+    Uncommitted changes and unpushed commits both count as work that has
+    nowhere else to live, and either one keeps a worktree standing: a session
+    record is cheap to lose, a directory of somebody's afternoon is not.
+
+    A restart shares its parent's name, and so its directory — so a base still
+    claimed by a session that survived the prune is left entirely alone.
+    """
+    live = {(s.get("worktree") or {}).get("base") for s in kept if (s.get("worktree") or {}).get("base")}
+    cwds = [Path(s["cwd"]) for s in kept if s.get("cwd")]
+    removed, held = 0, []
+    for session in dropped:
+        base = (session.get("worktree") or {}).get("base")
+        if not base or base in live or not Path(base).is_dir():
+            continue
+        here = Path(base)
+        if any(c == here or here in c.parents for c in cwds):
+            continue  # somebody still on record is standing in it
+        live.add(base)  # two dropped sessions can share one base; handle it once
+        for path in session_worktrees(Path(base)):
+            state = worktree_state(path)
+            if state:
+                held.append(f"{tilde(path)} ({state})")
+                continue
+            if remove_worktree(path):
+                removed += 1
+        try:
+            Path(base).rmdir()
+        except OSError:
+            pass
+
+    if removed:
+        note(f"removed {removed} finished worktree(s)")
+    for item in held:
+        note(f"kept {item}")
+    if held:
+        note(f"{PROG} prune leaves unsaved work alone; push it or delete it by hand")
 
 
 # ---------------------------------------------------------------- install
@@ -1631,6 +2122,37 @@ remembers it, so it stays the same across repos and however often you ask; a
 name you invent per call would not. If I ask for a different name, set it with
 `--set` rather than just using it, so the next call agrees with you.
 
+## Worktrees
+
+Sessions I start with `ais -w` work in their own git worktree, so parallel
+sessions never fight over one checkout. When `$AIS_WORKTREE` is set, that is
+where you already are, on a branch named after the session.
+
+Every worktree this session makes lives beside that one, under
+`$AIS_WORKTREE_BASE`. If the work reaches a second repository, do not clone it
+and do not run `git worktree` yourself — ais knows where this session's
+directory is and you do not:
+
+```
+ais wt add ~/git/other-repo   # makes it; prints the path, and only the path
+ais wt ls                     # this session's worktrees, with branch and state
+ais wt path other-repo        # the path again, for cd
+```
+
+`cd "$(ais wt add ~/git/other-repo)"` is the whole idiom. Make as many as the
+work needs; they all end up in one directory, on one branch name, so what this
+session touched stays together.
+
+Commit often — after each coherent step, not once at the end. A worktree is
+yours alone, so there is no one to disturb by committing early, and a commit is
+the only form the work survives in: if the session dies, `ais restart` gives you
+the branch back and nothing else. Small commits with real messages, please, not
+one "wip" at the end. Push when the work is ready for me, or when I ask.
+
+Committed and pushed work is also what lets ais tidy up: `ais prune` eventually
+removes the worktrees of long-dead sessions, but never one holding uncommitted
+changes or unpushed commits.
+
 Interacting with ais:
 
 - `ais ls`, `ais ls -a`, `ais status`, `ais current` and `ais name` are
@@ -1642,6 +2164,9 @@ Interacting with ais:
   inside this one) and no launching an agent harness directly.
 - NEVER run `ais restart`. It takes over the pane it runs in and puts another
   agent back to work; deciding that is mine.
+- `ais wt add`, `ais wt ls` and `ais wt path` are yours to run whenever the
+  work needs another repo. `ais prune` is not: it retires sessions and their
+  finished worktrees, and that is my call.
 - `~/.ais/sessions.json` belongs to ais, which locks it while writing. Never
   hand-edit it, and never clean up your own session entry: ais marks the session
   dead with its exit code when you terminate. `~/.ais/config.toml` is fine to
@@ -1931,7 +2456,12 @@ run:
   {PROG} -- claude                     start claude in a tracked session
   {PROG} -- pi                         ...or pi, or any harness in config.toml
   {PROG} -d "fix the auth bug" -- claude
+  {PROG} -w -d "fix the auth bug" -- claude    ...in a worktree of its own
   -d, --description TEXT             what this session is for; shown by select
+  -w, --worktree                     make a git worktree of the repo you are in
+                                     at <base>/<session name>/<repo>, on a
+                                     branch of that name, and start the harness
+                                     there. Fails if this is not a repo.
   -n, --dry-run                      print the command and env, run nothing
 
 commands:
@@ -1965,7 +2495,25 @@ commands:
                    telling the agent how to use ais from inside a session.
                    --harness claude|pi (default claude), -n/--dry-run,
                    --force to rewrite wiring ais did not write itself.
-  prune [--all]    drop dead sessions older than --days (default 7)
+  wt <cmd>         worktrees for this session, all under one directory:
+                     add [repo]   worktree of repo (default: here) at
+                                  <base>/<session name>/<repo>; prints the path
+                     ls [-a]      this session's worktrees (-a: every session's)
+                     path [repo]  print one path, for cd
+                     prune        drop registrations git holds for worktrees
+                                  that are already gone
+  prune [--all]    drop dead sessions older than --days (default 7), and the
+                   worktrees of the ones it drops — but never a worktree with
+                   uncommitted changes or unpushed commits, and never one a
+                   surviving session is still standing in.
+                   --keep-worktrees leaves every directory alone.
+
+worktrees:
+  A session's worktrees live at <base>/<session name>/<repo>, where <base> is
+  worktree.base in config.toml (~/wt by default, $AIS_WT_BASE overrides) and
+  <session name> is "ais name". The branch is that name too, in every repo, so
+  the directory, the branch and the session all agree. A session started with
+  -w exports AIS_WORKTREE and AIS_WORKTREE_BASE for the agent to find them.
 
 tmux:
   A session renames its window after itself while it runs — the session name,
@@ -1982,7 +2530,7 @@ tmux:
   unexpanded, so the format arrives literally. select works it out itself.
 
 files:
-  {tilde(CONFIG_PATH)}      per-harness flags and env, [tmux] and [notify] settings
+  {tilde(CONFIG_PATH)}      per-harness flags and env, [worktree], [tmux], [notify]
   {tilde(SESSIONS_PATH)}    session state
 
 ais must run inside tmux: a session it cannot jump back to is not worth tracking.
@@ -2005,6 +2553,7 @@ def main(argv: list[str]) -> int:
             die("nothing after '--': name the agent harness, e.g. ais -- claude")
         parser = argparse.ArgumentParser(prog=PROG, add_help=False)
         parser.add_argument("-d", "--description", default=None)
+        parser.add_argument("-w", "--worktree", action="store_true")
         parser.add_argument("-n", "--dry-run", action="store_true")
         parser.add_argument("-h", "--help", action="store_true")
         args, unknown = parser.parse_known_args(ais_args)
@@ -2021,7 +2570,7 @@ def main(argv: list[str]) -> int:
 
     commands = (
         "select", "ls", "status", "notify", "prune", "current", "name",
-        "restart", "install", "_preview", "_session-seen",
+        "restart", "install", "wt", "_preview", "_session-seen",
     )
     if ais_args[0] not in commands:
         hint = f"; to run a harness, separate it with '--': {PROG} -- {shlex.join(ais_args)}"
@@ -2057,7 +2606,14 @@ def main(argv: list[str]) -> int:
     p_prune = subs.add_parser("prune", add_help=False)
     p_prune.add_argument("--all", action="store_true", help="drop every dead session")
     p_prune.add_argument("--days", type=float, default=7)
+    p_prune.add_argument("--keep-worktrees", action="store_true")
     p_prune.set_defaults(fn=cmd_prune)
+
+    p_wt = subs.add_parser("wt", add_help=False)
+    p_wt.add_argument("subcommand", nargs="?", default="ls")
+    p_wt.add_argument("repo", nargs="?", default=None)
+    p_wt.add_argument("-a", "--all", action="store_true")
+    p_wt.set_defaults(fn=cmd_wt)
 
     p_current = subs.add_parser("current", add_help=False)
     p_current.set_defaults(fn=cmd_current)
