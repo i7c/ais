@@ -115,6 +115,10 @@ flags = []
                       # paths copied from the main checkout into each new
                       # worktree, when the checkout has them
 # fetch = true        # "git fetch origin" before branching; false to work offline
+# auto = false        # give every session a worktree of its own, as if -w were
+                      # passed — but only when you are in a git repo; outside
+                      # one the session just runs where you are. --no-worktree
+                      # opts a single run out.
 
 # [tmux] controls what a session does to the pane it runs in.
 [tmux]
@@ -223,10 +227,15 @@ def worktree_settings(config: dict) -> dict:
     if not isinstance(fetch, bool):
         die("config: worktree.fetch must be true or false")
 
+    auto = table.get("auto", False)
+    if not isinstance(auto, bool):
+        die("config: worktree.auto must be true or false")
+
     return {
         "base": Path(os.path.expanduser(os.path.expandvars(base))),
         "copy": [c for c in copy if c],
         "fetch": fetch,
+        "auto": auto,
     }
 
 
@@ -798,6 +807,24 @@ def repo_root(path) -> Path | None:
     return Path(common).parent if common else None
 
 
+def worktree_root(requested: bool | None, auto: bool) -> Path | None:
+    """The repo a new session should branch from, or None to run where we are.
+
+    requested is what the command line said: True for -w, False for
+    --no-worktree, None for neither, in which case worktree.auto decides. A
+    typed -w that cannot be honoured is fatal, and fatal here, before the
+    session is recorded and there is anything to clean up. The same wish coming
+    from the config is opportunistic: outside a repo there is nothing to branch
+    from, so the session simply runs in place.
+    """
+    if requested is False or (requested is None and not auto):
+        return None
+    root = repo_root(os.getcwd())
+    if root is None and requested:
+        die(f"-w needs a git repository; {tilde(os.getcwd())} is not in one")
+    return root
+
+
 def repo_name(root: Path) -> str:
     """What to call this repo's directory inside a session.
 
@@ -992,13 +1019,7 @@ def cmd_run(args, harness_argv: list[str]):
     settings = harness_settings(config, harness)
     harness_args = harness_argv[1:]
 
-    # Before anything is recorded: a "-w" that cannot be honoured must fail
-    # while there is still nothing to clean up.
-    root = None
-    if args.worktree:
-        root = repo_root(os.getcwd())
-        if root is None:
-            die(f"-w needs a git repository; {tilde(os.getcwd())} is not in one")
+    root = worktree_root(args.worktree, settings["worktree"]["auto"])
 
     # Mint the conversation id here rather than discovering it later: known
     # before the child exists, it lands in the record in the same write as
@@ -2462,6 +2483,7 @@ run:
                                      at <base>/<session name>/<repo>, on a
                                      branch of that name, and start the harness
                                      there. Fails if this is not a repo.
+      --no-worktree                  run here, even with worktree.auto on
   -n, --dry-run                      print the command and env, run nothing
 
 commands:
@@ -2515,6 +2537,10 @@ worktrees:
   the directory, the branch and the session all agree. A session started with
   -w exports AIS_WORKTREE and AIS_WORKTREE_BASE for the agent to find them.
 
+  auto = true under [worktree] makes that the default: every session gets a
+  worktree when you start it inside a repo, and runs where you are when you do
+  not. Only a -w you typed yourself insists — that one fails outside a repo.
+
 tmux:
   A session renames its window after itself while it runs — the session name,
   else the harness — and puts the old name back when it ends; otherwise tmux
@@ -2553,7 +2579,11 @@ def main(argv: list[str]) -> int:
             die("nothing after '--': name the agent harness, e.g. ais -- claude")
         parser = argparse.ArgumentParser(prog=PROG, add_help=False)
         parser.add_argument("-d", "--description", default=None)
-        parser.add_argument("-w", "--worktree", action="store_true")
+        # Three states, not two: -w, --no-worktree, and said nothing — which is
+        # the only one worktree.auto gets to decide.
+        parser.add_argument(
+            "-w", "--worktree", action=argparse.BooleanOptionalAction, default=None,
+        )
         parser.add_argument("-n", "--dry-run", action="store_true")
         parser.add_argument("-h", "--help", action="store_true")
         args, unknown = parser.parse_known_args(ais_args)

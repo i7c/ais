@@ -38,6 +38,7 @@ ais -w -d "port the parser" -- pi --thinking high
 - `-w, --worktree` — give the session its own git worktree of the repo you're
   standing in, and start the harness there (see below). Fails if you're not in
   a repo.
+- `--no-worktree` — run right here, even with `worktree.auto` on
 - `-n, --dry-run` — print the command and env, run nothing
 
 ## Commands
@@ -86,9 +87,15 @@ This replaces the standalone `wt` script. Configure it under `[worktree]`:
 base = "~/wt"
 copy = [".env", ".claude/settings.local.json"]   # untracked files a checkout needs
 fetch = true
+auto = false                                     # -w by default, where it applies
 ```
 
 `$AIS_WT_BASE` overrides `base` for a single run.
+
+`auto = true` makes a worktree the default: start a session inside a repo and it
+gets one without `-w`, start one anywhere else and it just runs where you are.
+Only a `-w` you typed yourself insists on a repo and fails without one; pass
+`--no-worktree` to opt a single run out.
 
 ## Files
 

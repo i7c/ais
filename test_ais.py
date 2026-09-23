@@ -566,8 +566,12 @@ class WorktreeSettings(unittest.TestCase):
     def test_copy_takes_a_bare_string_too(self):
         self.assertEqual(ais.worktree_settings({"worktree": {"copy": ".env"}})["copy"], [".env"])
 
+    def test_auto_is_off_until_the_config_says_otherwise(self):
+        self.assertIs(ais.worktree_settings({})["auto"], False)
+        self.assertIs(ais.worktree_settings({"worktree": {"auto": True}})["auto"], True)
+
     def test_nonsense_is_refused(self):
-        for table in ({"base": 7}, {"copy": [1]}, {"fetch": "yes"}):
+        for table in ({"base": 7}, {"copy": [1]}, {"fetch": "yes"}, {"auto": "yes"}):
             with self.assertRaises(SystemExit):
                 ais.worktree_settings({"worktree": table})
 
@@ -599,6 +603,43 @@ class Repo:
             ["git", "-C", str(self.path), *args],
             check=True, capture_output=True, text=True,
         )
+
+
+class WorktreeWanted(unittest.TestCase):
+    """Who decides a session gets a worktree: the command line, then the config."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name).resolve()
+        self.repo = Repo(self.root, "widget")
+        self.was = os.getcwd()
+
+    def tearDown(self):
+        os.chdir(self.was)
+        self.tmp.cleanup()
+
+    def test_neither_flag_nor_auto_means_no_worktree(self):
+        os.chdir(self.repo.path)
+        self.assertIsNone(ais.worktree_root(None, False))
+
+    def test_auto_takes_the_repo_you_are_standing_in(self):
+        os.chdir(self.repo.path)
+        self.assertEqual(ais.worktree_root(None, True), self.repo.path)
+
+    def test_auto_outside_a_repo_just_runs_where_it_is(self):
+        os.chdir(self.root)
+        self.assertIsNone(ais.worktree_root(None, True))
+
+    def test_no_worktree_beats_auto(self):
+        os.chdir(self.repo.path)
+        self.assertIsNone(ais.worktree_root(False, True))
+
+    def test_a_typed_w_outside_a_repo_is_still_fatal(self):
+        os.chdir(self.root)
+        with self.assertRaises(SystemExit):
+            ais.worktree_root(True, False)
+        with self.assertRaises(SystemExit):
+            ais.worktree_root(True, True)
 
 
 class WorktreeBasics(unittest.TestCase):
