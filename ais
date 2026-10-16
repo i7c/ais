@@ -2189,6 +2189,9 @@ def public_session(s: dict, config: dict, host: str) -> dict:
         "ended_at": s.get("ended_at"),
         "exit_code": s.get("exit_code"),
         "conversation": conversation,
+        # What was typed after the profile: run it again with these and you
+        # get the same thing, minus the conversation.
+        "args": list(s.get("harness_args") or []),
         "restart_of": s.get("restart_of"),
         "fork_of": s.get("fork_of"),
         # What can be done with it from here, so a caller need not re-derive

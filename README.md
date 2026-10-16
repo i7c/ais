@@ -133,6 +133,13 @@ Only a `-w` you typed yourself insists on a repo and fails without one; pass
 Anything else is the harness's own: `ais install` touches `~/.claude/` or
 `~/.pi/agent/` and backs up every file it changes as `<name>.ais.bak`.
 
+## tsm
+
+[`tsm/`](tsm/README.md) is a tmux session manager built on top of ais: one
+popup over every session, window and pane, with the agents ais started
+labelled, the ones calling for you first, and ended sessions a key away from
+restarting. It reads ais only through `ais state` and `ais env`.
+
 ## tmux integration
 
 A session renames its window after itself while running, and restores the old
@@ -155,6 +162,8 @@ is what `--since` compares.
 bind-key a display-popup -E -w 80% -h 60% -T " ais " \
   "~/git/ais/ais select"
 ```
+
+(or bind `a` to [tsm](tsm/README.md), which covers `select` and more)
 
 Picking a session from that popup switches the underlying client and the
 popup closes on its own. Don't pass `--client '#{client_name}'` — popups hand

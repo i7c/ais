@@ -1080,6 +1080,7 @@ class Api(unittest.TestCase):
         self.assertTrue(here["can_restart"] and here["can_resume"] and here["can_fork"])
         self.assertFalse(there["can_restart"] or there["can_fork"])
         self.assertEqual(here["conversation"], "conv-1")
+        self.assertEqual(here["args"], [])
 
     def test_since_keeps_only_newer_notifications(self):
         sessions = self.state(since="00000000000001aaaa")["sessions"]
