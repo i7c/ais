@@ -82,6 +82,7 @@ const (
 	SplitRight Placement = iota // beside it, in its window
 	SplitBelow                  // under it, in its window
 	NewWindow                   // a window of its own, right after it
+	NewSession                  // a session of its own
 )
 
 // Open makes a new pane next to anchor, in dir, with env, and returns its id.
@@ -105,6 +106,17 @@ func (t Tmux) Open(anchor *Pane, dir string, env map[string]string, where Placem
 	}
 	for _, k := range sortedKeys(env) {
 		args = append(args, "-e", k+"="+env[k])
+	}
+	out, err := t.run(args...)
+	return strings.TrimSpace(out), err
+}
+
+// NewSession starts a detached session called name, working in dir, and
+// returns its first pane.
+func (t Tmux) NewSession(name, dir string) (string, error) {
+	args := []string{"new-session", "-d", "-s", name, "-P", "-F", "#{pane_id}"}
+	if dir != "" {
+		args = append(args, "-c", dir)
 	}
 	out, err := t.run(args...)
 	return strings.TrimSpace(out), err

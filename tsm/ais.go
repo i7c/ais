@@ -13,11 +13,15 @@ import (
 // What tsm understands of "ais state" (api 1). Unknown keys are ignored, which
 // is the contract: ais may add, tsm must not mind.
 type AisState struct {
-	API          int          `json:"api"`
-	Host         string       `json:"host"`
-	NotifyWindow float64      `json:"notify_window"` // minutes
-	Profiles     []AisProfile `json:"profiles"`
-	Sessions     []AisSession `json:"sessions"`
+	API          int     `json:"api"`
+	Host         string  `json:"host"`
+	NotifyWindow float64 `json:"notify_window"` // minutes
+	Worktree     struct {
+		Base string `json:"base"`
+		Auto bool   `json:"auto"`
+	} `json:"worktree"`
+	Profiles []AisProfile `json:"profiles"`
+	Sessions []AisSession `json:"sessions"`
 }
 
 type AisProfile struct {
@@ -163,6 +167,19 @@ func (a Ais) Env(id string) (string, map[string]string, error) {
 		return "", nil, fmt.Errorf("ais env: %w", err)
 	}
 	return data.Cwd, data.Env, nil
+}
+
+// NameOf is the name ais would give a session with this description, so a
+// tmux session made for it can agree with its window, branch and worktree.
+func (a Ais) NameOf(description string) string {
+	if !a.Available() || description == "" {
+		return ""
+	}
+	out, err := a.r.Run(a.bin, "name", "--of", description)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(out)
 }
 
 func (st *AisState) ByID() map[string]*AisSession {

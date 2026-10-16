@@ -16,6 +16,7 @@ const (
 	modeConfirm
 	modeRename
 	modeHelp
+	modeCreate
 )
 
 const (
@@ -51,6 +52,8 @@ type model struct {
 		prompt string
 		row    Row
 	}
+
+	form *createForm
 
 	captures map[string]string
 	git      map[string]gitInfo
@@ -315,6 +318,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case doneMsg:
 		if msg.err != nil {
+			if m.mode == modeCreate && m.form != nil {
+				m.form.err = msg.err.Error()
+				return m, nil
+			}
 			m.setStatus(msg.err.Error(), true)
 			return m, nil
 		}
@@ -424,6 +431,22 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 	case modeHelp:
 		m.mode = modeNormal
 		return nil
+
+	case modeCreate:
+		cmd, launch, cancel := m.form.update(msg)
+		switch {
+		case cancel:
+			m.mode, m.form = modeNormal, nil
+		case launch:
+			spec, err := m.form.Spec()
+			if err != nil {
+				m.form.err = err.Error()
+				return nil
+			}
+			m.form.remember()
+			return m.do(func(a Actions) (Outcome, error) { return a.Create(spec) })
+		}
+		return cmd
 	}
 
 	r, ok := m.selected()
@@ -496,6 +519,16 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		return m.filter.Focus()
 	case "?":
 		m.mode = modeHelp
+		return nil
+	case "n":
+		// New things go next to the selection: that is what you were
+		// looking at when you thought of them.
+		anchor := m.snap.Pane(m.snap.Client.PaneID)
+		if ok && r.Kind != RowResumable && r.Target() != nil {
+			anchor = r.Target()
+		}
+		m.form = newCreateForm(m.snap, m.st, anchor, m.ais.Available())
+		m.mode = modeCreate
 		return nil
 	case "ctrl+r":
 		return tea.Batch(m.loadSnap(), m.loadState(), m.selectionCmds())

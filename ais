@@ -1743,6 +1743,16 @@ def cmd_name(args):
     Derived once from the description, then persisted, so every later call in
     this session — in any repo — returns the same name.
     """
+    if args.of is not None:
+        # The name a session described this way would get, for callers that
+        # want to name things to match before the session exists (tsm names
+        # a new tmux session like this). Not stored: no session asked yet.
+        name = slugify(args.of)
+        if not name:
+            return 1
+        print(name)
+        return 0
+
     sid = os.environ.get("AIS_SESSION")
     if not sid:
         note("not running inside an ais session; no session name to derive")
@@ -2878,7 +2888,8 @@ commands:
   current          show the session this shell is running in
   name [--set N]   print this session's base name, for worktrees and branches;
                    derived from the description once, then stable for the
-                   session's whole life. --set overrides it.
+                   session's whole life. --set overrides it. --of TEXT prints
+                   the name a session described as TEXT would get.
   restart [id]     run a dead session's harness again in this pane, resuming
                    its conversation; with no id, the last one that died here.
                    Keeps its directory and name, gets a new ais id.
@@ -3062,6 +3073,7 @@ def main(argv: list[str]) -> int:
 
     p_name = subs.add_parser("name", add_help=False)
     p_name.add_argument("--set", default=None, metavar="NAME")
+    p_name.add_argument("--of", default=None, metavar="DESCRIPTION")
     p_name.set_defaults(fn=cmd_name)
 
     p_restart = subs.add_parser("restart", add_help=False)

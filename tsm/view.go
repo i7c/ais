@@ -78,9 +78,12 @@ func (m *model) View() string {
 	if m.showPreview() {
 		pw := m.width - lw - 3
 		var preview []string
-		if m.mode == modeHelp {
+		switch m.mode {
+		case modeHelp:
 			preview = helpLines()
-		} else {
+		case modeCreate:
+			preview = m.form.view(pw, bh, m.ais.Command())
+		default:
 			preview = m.preview(pw, bh)
 		}
 		rule := fg(cRule).Render("│")
@@ -93,6 +96,12 @@ func (m *model) View() string {
 		}
 	} else {
 		lines := list
+		if m.mode == modeCreate {
+			lines = nil
+			for _, l := range m.form.view(m.width-2, bh, m.ais.Command()) {
+				lines = append(lines, " "+l)
+			}
+		}
 		if m.mode == modeHelp {
 			lines = nil
 			for _, l := range helpLines() {
@@ -161,6 +170,10 @@ func (m *model) footer() string {
 		line = " " + fg(cWant).Render(m.confirm.prompt) + "  " + key("y", "yes") + "  " + key("any", "no")
 	case m.mode == modeRename:
 		line = " " + m.rename.View()
+	case m.mode == modeCreate:
+		line = " " + strings.Join([]string{
+			key("⏎", "start"), key("tab", "next"), key("←→", "choose"), key("↑↓", "pick dir"), key("esc", "cancel"),
+		}, "  ")
 	case m.status != "":
 		c := cOK
 		if m.statusErr {
@@ -171,7 +184,7 @@ func (m *model) footer() string {
 		line = " " + fg(cWant).Render("ais: "+m.stErr.Error())
 	default:
 		hints := []string{
-			key("⏎", "go"), key("v/V", "split"), key("t", "shell"), key("d", "dup"),
+			key("⏎", "go"), key("n", "new"), key("v/V", "split"), key("t", "shell"), key("d", "dup"),
 			key("x", "kill"), key("r", "rename"), key("z", "zoom"), key("/", "filter"), key("?", "more"),
 		}
 		if r, ok := m.selected(); ok && r.Kind == RowResumable {
@@ -203,6 +216,7 @@ func helpLines() []string {
 		k("d", "duplicate: fork an agent, else a shell"),
 		k("x", "kill (asks unless it is an idle shell)"),
 		k("r", "rename the session or window"),
+		k("n", "new: profile, directory, worktree, place"),
 		k("ctrl-r", "refresh now"),
 		"",
 		fg(cDim).Render("a new shell beside an ais pane starts in its"),

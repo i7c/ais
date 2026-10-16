@@ -58,9 +58,44 @@ is still a full tmux manager, just without the agent layer.
 | `d` | duplicate: `ais run --fork` an agent whose profile can fork, a fresh one of the same profile (same args, no new worktree) where it cannot, a shell otherwise |
 | `x` | kill the pane, window or session — asks first unless it is an idle shell |
 | `r` | rename the session or window |
+| `n` | new: a profile or a shell, somewhere, in a new worktree or not, as a window, split or session (below) |
 | `/` | filter on session, window, command, directory and description; every word must match |
 | `j k` `tab` `h l` `g G` | move, next session, collapse/expand, top/bottom |
 | `?` | help |
+
+## Making something new
+
+`n` opens a form next to the list:
+
+```
+ NEW ────────────────────────────────────────────────
+ what       claude  pi  shell
+ where     / wid
+           ▸ ~/git/widget                    ⎇ repo
+             ~/wt/fix-lexer/widget           ⎇ worktree
+ worktree   new  here
+ place      window in soi  split right  split below  new session
+ about     port the parser
+
+ runs      ais run claude -w -d 'port the parser'
+ in        ~/git/widget
+```
+
+- **where** is a list to filter (or a path to type): the selection's
+  directory, yours, every pane's, where ais sessions ran, the worktrees under
+  ais's `worktree.base`, and the repos under `$TSM_ROOTS` (colon-separated,
+  default `~/git`, two levels deep).
+- **worktree** is asked only for a profile in a repo. `new` passes `-w`
+  (ais branches the repo and starts there, named after the session), `here`
+  passes `--no-worktree`, so the answer holds whatever `worktree.auto` says.
+  "Another agent on that repo" is a repo plus `new`; "another agent in that
+  worktree" is the worktree plus `here` (or `d` on the agent).
+- **place** puts it after the selection's window, beside the selection, or in
+  a session of its own, named like the work (`ais name --of`).
+- `tab` moves between fields, `←→` changes a choice, `↑↓` picks a directory,
+  `⏎` starts from any field. What, place and worktree default to what you
+  chose last (kept in `~/.cache/tsm/`), and the form opens on where — so
+  `n`, a few letters of a repo, `⏎` is the common case.
 
 A new shell beside an ais pane starts in the session's directory — its
 worktree — with its profile's env and `$AIS_WORKTREE`/`$AIS_WORKTREE_BASE`

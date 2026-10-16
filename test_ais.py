@@ -1110,6 +1110,14 @@ class Api(unittest.TestCase):
         self.assertEqual(len(first), len(second))
 
 
+class NameOf(unittest.TestCase):
+    def test_previews_the_name_without_a_session(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = ais.cmd_name(argparse.Namespace(of="port the parser", set=None))
+        self.assertEqual((code, out.getvalue()), (0, "port-parser\n"))
+
+
 class RunCommand(unittest.TestCase):
     """"ais run <profile>" is "ais -- <profile>" spelled out."""
 
