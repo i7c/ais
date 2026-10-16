@@ -117,7 +117,7 @@ class SessionConfig(unittest.TestCase):
         for harness, block in (
             ("claude", ais.CLAUDE_SESSION_CONFIG), ("pi", ais.PI_SESSION_CONFIG),
         ):
-            table = tomllib.loads(block)["harness"][harness]["session"]
+            table = tomllib.loads(block)["profile"][harness]["session"]
             conf = ais.session_settings(table, harness)
             self.assertIn("--session-id", conf["conflicts"])
             self.assertTrue(conf["new"] and conf["resume"])
@@ -125,7 +125,7 @@ class SessionConfig(unittest.TestCase):
     def test_pi_reopens_with_the_flag_it_was_created_with(self):
         """pi's --session-id creates when there is none and opens when there is,
         so new and resume are the same flag and restart still lands."""
-        table = tomllib.loads(ais.PI_SESSION_CONFIG)["harness"]["pi"]["session"]
+        table = tomllib.loads(ais.PI_SESSION_CONFIG)["profile"]["pi"]["session"]
         conf = ais.session_settings(table, "pi")
         self.assertEqual(ais.session_argv(conf["resume"], "abc"), ["--session-id", "abc"])
         for typed in ("-c", "--continue", "-r", "--resume", "--session", "--fork"):
@@ -528,9 +528,16 @@ class InstallConfig(Quietly):
     def test_adds_then_leaves_alone(self):
         ais.install_config("pi", ais.PI_SESSION_CONFIG, dry=False)
         once = ais.CONFIG_PATH.read_text()
-        self.assertIn("[harness.pi.session]", once)
+        self.assertIn("[profile.pi.session]", once)
         ais.install_config("pi", ais.PI_SESSION_CONFIG, dry=False)
         self.assertEqual(ais.CONFIG_PATH.read_text(), once)
+
+    def test_a_table_under_the_old_name_counts_as_installed(self):
+        ais.load_config()
+        before = ais.CONFIG_PATH.read_text() + ais.CLAUDE_SESSION_CONFIG.replace("[profile.", "[harness.")
+        ais.CONFIG_PATH.write_text(before)
+        ais.install_config("claude", ais.CLAUDE_SESSION_CONFIG, dry=False)
+        self.assertEqual(ais.CONFIG_PATH.read_text(), before)
 
     def test_the_starter_config_does_not_count_as_installed(self):
         """It ships the table commented out as documentation."""
@@ -541,8 +548,8 @@ class InstallConfig(Quietly):
         ais.install_config("claude", ais.CLAUDE_SESSION_CONFIG, dry=False)
         ais.install_config("pi", ais.PI_SESSION_CONFIG, dry=False)
         config = tomllib.loads(ais.CONFIG_PATH.read_text())
-        self.assertEqual(config["harness"]["claude"]["session"]["resume"], ["--resume", "{id}"])
-        self.assertEqual(config["harness"]["pi"]["session"]["resume"], ["--session-id", "{id}"])
+        self.assertEqual(config["profile"]["claude"]["session"]["resume"], ["--resume", "{id}"])
+        self.assertEqual(config["profile"]["pi"]["session"]["resume"], ["--session-id", "{id}"])
 
 
 class WorktreeSettings(unittest.TestCase):
@@ -913,6 +920,225 @@ class SessionWorktrees(unittest.TestCase):
     def test_prune_ignores_sessions_that_never_had_one(self):
         self.retire([{"id": "x", "cwd": str(self.repo.path)}])
         self.assertTrue((self.repo.path / "README").exists())
+
+
+class Profiles(unittest.TestCase):
+    """[profile.*] is the name now; [harness.*] still works underneath it."""
+
+    def test_the_old_name_is_still_read(self):
+        config = {"harness": {"claude": {"flags": ["--x"]}}}
+        self.assertEqual(ais.harness_settings(config, "claude")["flags"], ["--x"])
+
+    def test_the_new_name_wins_key_by_key_and_env_merges(self):
+        config = {
+            "harness": {"claude": {"flags": ["--old"], "env": {"A": "1", "B": "1"}}},
+            "profile": {"claude": {"command": ["npx", "claude"], "env": {"B": "2"}}},
+        }
+        settings = ais.harness_settings(config, "claude")
+        self.assertEqual(settings["flags"], ["--old"])
+        self.assertEqual(settings["command"], ["npx", "claude"])
+        self.assertEqual(settings["env"], {"A": "1", "B": "2"})
+
+    def test_names_come_from_both_spellings(self):
+        config = {"harness": {"pi": {}}, "profile": {"claude": {}, "api": {}}}
+        self.assertEqual(ais.profile_names(config), ["api", "claude", "pi"])
+
+    def test_old_records_have_a_profile_too(self):
+        self.assertEqual(ais.session_profile({"harness": "pi"}), "pi")
+        self.assertEqual(ais.session_profile({"profile": "api", "harness": "api"}), "api")
+
+    def test_fork_must_carry_the_id_and_its_flags_conflict(self):
+        with self.assertRaises(SystemExit):
+            ais.session_settings({"fork": ["--fork-session"]}, "claude")
+        conf = ais.session_settings({"fork": ["--resume", "{id}", "--fork-session"]}, "claude")
+        self.assertEqual(conf["conflicts"], ["--fork-session", "--resume"])
+
+    def test_claude_ships_with_a_fork(self):
+        table = tomllib.loads(ais.CLAUDE_SESSION_CONFIG)["profile"]["claude"]["session"]
+        conf = ais.session_settings(table, "claude")
+        self.assertEqual(
+            ais.session_argv(conf["fork"], "u"), ["--resume", "u", "--fork-session"]
+        )
+
+
+class PaneMarks(unittest.TestCase):
+    """A running session labels its pane, and takes the labels away after."""
+
+    session = {"id": "abc", "harness": "claude", "description": "fix it", "cwd": "/w/x"}
+
+    def setUp(self):
+        self.real_tmux = ais.tmux
+        self.calls = []
+        ais.tmux = lambda *a, check=False: (
+            self.calls.append(list(a)) or subprocess.CompletedProcess(list(a), 0, "", "")
+        )
+
+    def tearDown(self):
+        ais.tmux = self.real_tmux
+
+    def test_marks_then_unmarks(self):
+        with ais.pane_marked("%3", self.session):
+            self.calls.append(["<running>"])
+        at = self.calls.index(["<running>"])
+        self.assertIn(["set-option", "-p", "-t", "%3", "@ais_id", "abc"], self.calls[:at])
+        self.assertIn(["set-option", "-p", "-t", "%3", "@cwd", "/w/x"], self.calls[:at])
+        self.assertIn(["set-option", "-p", "-t", "%3", "@ais_profile", "claude"], self.calls[:at])
+        self.assertIn(["set-option", "-p", "-u", "-t", "%3", "@ais_id"], self.calls[at:])
+        self.assertEqual(len(self.calls[at + 1:]), 4)
+
+    def test_empty_marks_are_not_set(self):
+        self.assertNotIn("@ais_desc", ais.pane_marks({"id": "abc", "cwd": "/w"}))
+
+
+class LiveLocation(unittest.TestCase):
+    """Panes move; the record follows wherever tmux says the pane is now."""
+
+    def setUp(self):
+        self.real = ais.tmux, ais.process_alive
+        self.listing = "soi\t$1\t@4\t2\t%7\t1\n"
+        ais.tmux = lambda *a, check=False: subprocess.CompletedProcess(
+            list(a), 0, self.listing, ""
+        )
+        ais.process_alive = lambda pid: True
+
+    def tearDown(self):
+        ais.tmux, ais.process_alive = self.real
+
+    def test_reap_moves_the_record_with_the_pane(self):
+        import socket
+        s = {
+            "id": "a", "status": "active", "hostname": socket.gethostname(), "pid": 1,
+            "tmux": {"session_name": "old", "session_id": "$0", "window_id": "@1",
+                     "window_index": "1", "pane_id": "%7", "pane_index": "1"},
+        }
+        self.assertEqual(ais.reap([s]), 0)
+        self.assertEqual(s["tmux"]["session_name"], "soi")
+        self.assertEqual(s["tmux"]["window_id"], "@4")
+
+    def test_a_vanished_pane_is_still_death(self):
+        import socket
+        self.listing = ""
+        s = {"id": "a", "status": "active", "hostname": socket.gethostname(), "pid": 1,
+             "tmux": {"pane_id": "%7"}}
+        self.assertEqual(ais.reap([s]), 1)
+        self.assertEqual(s["status"], "dead")
+
+
+class Api(unittest.TestCase):
+    """state and env: the JSON other programs build on."""
+
+    def setUp(self):
+        import socket
+        self.tmp = tempfile.TemporaryDirectory()
+        home = Path(self.tmp.name)
+        self.saved = ais.AIS_HOME, ais.CONFIG_PATH, ais.SESSIONS_PATH, ais.LOCK_PATH, ais.tmux
+        ais.AIS_HOME = home
+        ais.CONFIG_PATH = home / "config.toml"
+        ais.SESSIONS_PATH = home / "sessions.json"
+        ais.LOCK_PATH = home / "sessions.lock"
+        ais.tmux = lambda *a, check=False: subprocess.CompletedProcess(list(a), 1, "", "")
+        ais.CONFIG_PATH.write_text(
+            '[profile.claude]\nenv = { FOO = "bar" }\n'
+            + ais.CLAUDE_SESSION_CONFIG
+        )
+        self.host = socket.gethostname()
+        ais.write_sessions([
+            {"id": "dead000001", "harness": "claude", "status": "dead", "hostname": self.host,
+             "cwd": str(home), "session_ids": ["conv-1"], "started_at": "2026-01-01T00:00:00+00:00",
+             "worktree": {"base": "/wt/x", "initial": "/wt/x/repo", "branch": "x"},
+             "notifications": [
+                 {"id": "00000000000001aaaa", "at": "2026-01-01T00:00:00+00:00", "message": "old"},
+                 {"id": "00000000000002aaaa", "at": "2026-01-01T00:00:01+00:00", "message": "new"},
+             ]},
+            {"id": "gone000001", "harness": "claude", "status": "dead", "hostname": "elsewhere",
+             "cwd": "/nope", "session_ids": [], "started_at": "2026-01-02T00:00:00+00:00"},
+        ])
+
+    def tearDown(self):
+        ais.AIS_HOME, ais.CONFIG_PATH, ais.SESSIONS_PATH, ais.LOCK_PATH, ais.tmux = self.saved
+        self.tmp.cleanup()
+
+    def run_json(self, fn, **kw):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            fn(argparse.Namespace(**kw))
+        return json.loads(out.getvalue())
+
+    def state(self, **kw):
+        return self.run_json(ais.cmd_state, **{"active": False, "since": None, "json": True, **kw})
+
+    def test_state_is_versioned_and_lists_profiles(self):
+        data = self.state()
+        self.assertEqual(data["api"], ais.API_VERSION)
+        claude = next(p for p in data["profiles"] if p["name"] == "claude")
+        self.assertTrue(claude["resumable"] and claude["forkable"])
+
+    def test_state_says_what_can_be_done(self):
+        by_id = {s["id"]: s for s in self.state()["sessions"]}
+        here, there = by_id["dead000001"], by_id["gone000001"]
+        self.assertEqual(here["profile"], "claude")
+        self.assertTrue(here["can_restart"] and here["can_resume"] and here["can_fork"])
+        self.assertFalse(there["can_restart"] or there["can_fork"])
+        self.assertEqual(here["conversation"], "conv-1")
+
+    def test_since_keeps_only_newer_notifications(self):
+        sessions = self.state(since="00000000000001aaaa")["sessions"]
+        self.assertEqual([s["id"] for s in sessions], ["dead000001"])
+        self.assertEqual([n["message"] for n in sessions[0]["notifications"]], ["new"])
+
+    def test_active_drops_the_dead(self):
+        self.assertEqual(self.state(active=True)["sessions"], [])
+
+    def test_env_carries_the_profile_env_and_worktree_but_not_the_session(self):
+        data = self.run_json(ais.cmd_env, id="dead", json=True)
+        self.assertEqual(data["env"]["FOO"], "bar")
+        self.assertEqual(data["env"]["AIS_WORKTREE"], "/wt/x/repo")
+        self.assertNotIn("AIS_SESSION", data["env"])
+
+    def test_env_as_shell(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            ais.cmd_env(argparse.Namespace(id="dead", json=False))
+        self.assertIn("export AIS_WORKTREE_BASE=/wt/x", out.getvalue())
+        self.assertTrue(out.getvalue().startswith("cd "))
+
+    def test_notification_ids_sort_by_time(self):
+        first = ais.notification_id()
+        second = ais.notification_id()
+        self.assertLess(first[:14], second[:14] + "~")
+        self.assertEqual(len(first), len(second))
+
+
+class RunCommand(unittest.TestCase):
+    """"ais run <profile>" is "ais -- <profile>" spelled out."""
+
+    def setUp(self):
+        self.real = ais.cmd_run
+        self.seen = []
+        ais.cmd_run = lambda args, argv: self.seen.append((args, argv)) or 0
+
+    def tearDown(self):
+        ais.cmd_run = self.real
+
+    def test_run_and_dashdash_agree(self):
+        ais.main(["run", "claude", "-d", "x", "--", "--model", "opus"])
+        ais.main(["-d", "x", "--", "claude", "--model", "opus"])
+        (a, argv_a), (b, argv_b) = self.seen
+        self.assertEqual(argv_a, argv_b)
+        self.assertEqual(a.description, b.description)
+
+    def test_fork_needs_no_profile(self):
+        ais.main(["run", "--fork", "abc"])
+        args, argv = self.seen[0]
+        self.assertEqual((args.fork, argv), ("abc", []))
+
+    def test_run_needs_something_to_run(self):
+        with self.assertRaises(SystemExit):
+            ais.main(["run"])
+
+    def test_fork_and_worktree_do_not_mix(self):
+        with self.assertRaises(SystemExit):
+            ais.main(["run", "--fork", "abc", "-w"])
 
 
 if __name__ == "__main__":

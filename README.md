@@ -1,9 +1,11 @@
 # ais — ai-session
 
-Starts an agent harness (e.g. Claude Code) with the right flags and env,
+Starts a process from a named **profile** — the right command, flags and env —
 tracks the run in `~/.ais/sessions.json`, and lets you jump back to its tmux
-pane later. Sessions are tracked only inside tmux — a session ais can't point
-back to isn't worth recording.
+pane later. The first profiles are agent harnesses (Claude Code, pi), which
+also get their conversation resumed on restart; any other process you start
+the same way often enough deserves one too. Sessions are tracked only inside
+tmux — a session ais can't point back to isn't worth recording.
 
 ## Install
 
@@ -30,16 +32,40 @@ install replaces its own section and nothing else. `-n/--dry-run` previews,
 ## Starting a session
 
 ```
-ais -d "fix the auth bug" -- claude
-ais -w -d "port the parser" -- pi --thinking high
+ais run claude -d "fix the auth bug"
+ais run pi -w -d "port the parser" -- --thinking high
+ais -w -d "port the parser" -- pi --thinking high   # the same, abbreviated
+ais run --fork <id>                                 # a second agent beside <id>
 ```
 
 - `-d, --description TEXT` — what the session is for; shown by `select`
 - `-w, --worktree` — give the session its own git worktree of the repo you're
-  standing in, and start the harness there (see below). Fails if you're not in
-  a repo.
+  standing in, and start it there (see below). Fails if you're not in a repo.
 - `--no-worktree` — run right here, even with `worktree.auto` on
+- `--cwd DIR` — start in `DIR` instead of here
+- `--fork ID` — start a copy of session `ID` beside it: same profile, directory
+  and worktree, conversation forked through the profile's `session.fork`
 - `-n, --dry-run` — print the command and env, run nothing
+
+## Profiles
+
+```toml
+[profile.claude]
+flags = ["--dangerously-skip-permissions"]
+
+[profile.claude.session]          # how it names conversations: restart/fork
+id = "uuid4"
+new = ["--session-id", "{id}"]
+resume = ["--resume", "{id}"]
+fork = ["--resume", "{id}", "--fork-session"]
+
+[profile.api]                     # not every profile is an agent
+command = ["just", "dev"]
+env = { PORT = "8001" }
+```
+
+`[harness.<name>]` is the old spelling and is still read; where both exist,
+`[profile.<name>]` wins key by key and `env` merges.
 
 ## Commands
 
@@ -53,6 +79,8 @@ ais -w -d "port the parser" -- pi --thinking high
 | `name [--set N]` | Print (or set) this session's stable base name, for worktrees/branches. |
 | `restart [id]` | Re-run a dead session's harness in this pane, resuming its conversation. Keeps directory, name and worktree, gets a new ais id. `--fresh` for a new conversation. |
 | `wt <cmd>` | This session's worktrees: `add [repo]`, `ls [-a]`, `path [repo]`, `prune`. |
+| `state` | Every profile and session as JSON — the API other programs (tsm) read. `--active`, `--since <notification id>`. |
+| `env <id>` | Where a session runs and the env a shell beside it needs, as shell to `eval` or `--json`. |
 | `prune [--all]` | Drop dead sessions older than `--days` (default 7), and the finished worktrees of the ones it drops. `--keep-worktrees` to leave those alone. |
 
 ## Worktrees
@@ -109,6 +137,19 @@ Anything else is the harness's own: `ais install` touches `~/.claude/` or
 
 A session renames its window after itself while running, and restores the old
 name on exit (disable via `rename = false` under `[tmux]`).
+
+While it runs it also marks its pane with `@ais_id`, `@ais_profile`,
+`@ais_desc` and `@cwd`, and ais itself stands in the session's directory — so
+`#{pane_current_path}`, and every split made from it, lands in the agent's
+worktree. Panes can be moved freely: ais follows them by pane id.
+
+## API
+
+`ais state` and `ais env --json` are a contract, not a dump of
+`sessions.json`: both carry an `"api"` version, and readers must ignore keys
+they don't know. Each session says what can be done with it (`can_restart`,
+`can_resume`, `can_fork`); notifications carry ids that sort by time, which
+is what `--since` compares.
 
 ```
 bind-key a display-popup -E -w 80% -h 60% -T " ais " \

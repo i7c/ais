@@ -66,12 +66,15 @@ SECTION_END = "<!-- ais:end -->"
 DEFAULT_CONFIG = '''\
 # ais configuration.
 #
-# [defaults] applies to every harness; [harness.<name>] adds to it. The harness
-# name is the token you type after "--" (its basename if you pass a path), so
-# "ais -- claude" reads [harness.claude] and "ais -- pi" reads [harness.pi]. A
-# name with a dot in it has to be quoted: [harness."my-agent.sh"].
+# A profile is a named way to start a process: its command, flags, env and,
+# for agent harnesses, how it names conversations. [defaults] applies to every
+# profile; [profile.<name>] adds to it. The name is the token you type after
+# "ais run" or "--" (its basename if you pass a path), so "ais run claude" and
+# "ais -- claude" both read [profile.claude]. A name with a dot in it has to be
+# quoted: [profile."my-agent.sh"]. [harness.<name>] is the old spelling and is
+# still read; where both exist, [profile.<name>] wins key by key.
 #
-# Final argv is:   <command> <config flags> <args you typed after the harness>
+# Final argv is:   <command> <config flags> <args you typed after the profile>
 # Yours come last so the same flag typed by hand overrides the config default.
 #
 # env values go through ~ and $VAR expansion.
@@ -82,29 +85,31 @@ flags = []
 [defaults.env]
 # MY_SHARED_VAR = "value"
 
-[harness.claude]
+[profile.claude]
 flags = []
 # command = ["claude"]   # override the executable, e.g. ["npx", "claude"]
 
-[harness.claude.env]
+[profile.claude.env]
 # ANTHROPIC_LOG = "debug"
 
-# [harness.<name>.session] teaches ais how that harness names conversations, so
+# [profile.<name>.session] teaches ais how that harness names conversations, so
 # "ais restart" can pick one up where it left off. {id} is the conversation id:
 # ais mints it (see "id") for a new session and replays it for a restart.
-# Without this table a harness is still tracked, it just restarts fresh.
+# Without this table a profile is still tracked, it just restarts fresh.
 #
-# [harness.claude.session]
+# [profile.claude.session]
 # id = "uuid4"                     # or "short" for ais's own id alphabet
 # new = ["--session-id", "{id}"]
 # resume = ["--resume", "{id}"]
+# fork = ["--resume", "{id}", "--fork-session"]   # "ais run --fork": a copy
 # conflicts = ["-c", "--continue", "--fork-session"]   # you typed it: ais keeps out
 
-# [harness.pi]
-# flags = []
+# Not every profile is an agent:
+# [profile.api]
+# command = ["just", "dev"]
 
-# [harness.pi.env]
-# PI_CACHE_RETENTION = "long"
+# [profile.api.env]
+# PORT = "8001"
 
 # [worktree] controls "ais -w" and "ais wt". Every worktree a session makes
 # lands under base/<session name>, on a branch named after the session, so one
@@ -120,7 +125,9 @@ flags = []
                       # one the session just runs where you are. --no-worktree
                       # opts a single run out.
 
-# [tmux] controls what a session does to the pane it runs in.
+# [tmux] controls what a session does to the pane it runs in. Whatever this
+# says, a session marks its pane with @ais_id, @ais_profile, @ais_desc and @cwd
+# for as long as it runs, so tmux (and tsm) can tell which pane is which.
 [tmux]
 # rename = true       # name the window after the session while it runs, and put
                       # the old name back afterwards; false leaves tmux's own
@@ -161,15 +168,49 @@ def load_config() -> dict:
         die(f"{tilde(CONFIG_PATH)}: {exc}")
 
 
-def harness_settings(config: dict, harness: str) -> dict:
-    """Merge [defaults] with [harness.<harness>]; flags concatenate, env merges."""
-    defaults = config.get("defaults") or {}
-    table = config.get("harness") or {}
-    specific = table.get(harness)
-    if specific is None:
-        specific = table.get(Path(harness).name) or {}
+def profile_table(config: dict, profile: str) -> dict:
+    """The config for one profile: [profile.<name>] laid over [harness.<name>].
 
-    for name, src in (("defaults", defaults), (f"harness.{harness}", specific)):
+    [harness.*] is what profiles were called while every one of them launched
+    an agent; it is still read, so a config written then keeps working, and a
+    later [profile.*] table only has to say what it changes. env merges, every
+    other key is replaced whole.
+    """
+    merged: dict = {}
+    for section in ("harness", "profile"):
+        table = config.get(section) or {}
+        if not isinstance(table, dict):
+            die(f"config: [{section}] must be a table")
+        specific = table.get(profile)
+        if specific is None:
+            specific = table.get(Path(profile).name)
+        if specific is None:
+            continue
+        if not isinstance(specific, dict):
+            die(f"config: [{section}.{profile}] must be a table")
+        env = {**(merged.get("env") or {}), **(specific.get("env") or {})}
+        merged.update(specific)
+        if env:
+            merged["env"] = env
+    return merged
+
+
+def profile_names(config: dict) -> list[str]:
+    """Every profile the config mentions, under either name."""
+    names = set()
+    for section in ("harness", "profile"):
+        table = config.get(section) or {}
+        if isinstance(table, dict):
+            names.update(k for k, v in table.items() if isinstance(v, dict))
+    return sorted(names)
+
+
+def harness_settings(config: dict, harness: str) -> dict:
+    """Merge [defaults] with the profile's table; flags concatenate, env merges."""
+    defaults = config.get("defaults") or {}
+    specific = profile_table(config, harness)
+
+    for name, src in (("defaults", defaults), (f"profile.{harness}", specific)):
         if not isinstance(src, dict):
             die(f"config: [{name}] must be a table")
 
@@ -251,7 +292,7 @@ def rename_window_setting(config: dict) -> bool:
 
 
 def session_settings(table, harness: str) -> dict | None:
-    """Validate [harness.<name>.session]; None when the harness has no such table.
+    """Validate [profile.<name>.session]; None when the profile has no such table.
 
     Both templates are optional on their own: a harness that can resume but not
     be told its id up front still works, ais just has no id to give it until
@@ -260,10 +301,10 @@ def session_settings(table, harness: str) -> dict | None:
     if table is None:
         return None
     if not isinstance(table, dict):
-        die(f"config: [harness.{harness}.session] must be a table")
+        die(f"config: [profile.{harness}.session] must be a table")
 
     out = {}
-    for key in ("new", "resume", "conflicts"):
+    for key in ("new", "resume", "fork", "conflicts"):
         value = table.get(key) or []
         if isinstance(value, str):
             value = [value]
@@ -276,13 +317,16 @@ def session_settings(table, harness: str) -> dict | None:
         die(f'config: session.id for {harness} must be "uuid4" or "short"')
     out["id"] = kind
 
-    for key in ("new", "resume"):
+    for key in ("new", "resume", "fork"):
         if out[key] and not any("{id}" in part for part in out[key]):
             die(f"config: session.{key} for {harness} must contain {{id}} somewhere")
 
     # Asking for the same conversation twice, in two ways, is an argv error in
     # every harness worth supporting — so ais stands down when you name one.
-    flags = {p for p in out["new"] + out["resume"] + out["conflicts"] if p.startswith("-")}
+    flags = {
+        p for p in out["new"] + out["resume"] + out["fork"] + out["conflicts"]
+        if p.startswith("-")
+    }
     out["conflicts"] = sorted(flags)
     return out
 
@@ -408,23 +452,44 @@ def require_tmux() -> str:
     return pane
 
 
+LOCATION_KEYS = ("session_name", "session_id", "window_id", "window_index", "pane_id", "pane_index")
+LOCATION_FORMAT = "\t".join("#{%s}" % key for key in LOCATION_KEYS)
+
+
+def parse_location(line: str) -> dict | None:
+    parts = line.strip("\n").split("\t")
+    if len(parts) != len(LOCATION_KEYS):
+        return None
+    return dict(zip(LOCATION_KEYS, parts))
+
+
 def capture_tmux_location(pane: str) -> dict | None:
-    fmt = "#{session_name}\t#{session_id}\t#{window_id}\t#{window_index}\t#{pane_id}\t#{pane_index}"
-    res = tmux("display-message", "-p", "-t", pane, "-F", fmt)
+    res = tmux("display-message", "-p", "-t", pane, "-F", LOCATION_FORMAT)
     if res.returncode != 0:
         return None
-    parts = res.stdout.strip().split("\t")
-    if len(parts) != 6:
-        return None
-    keys = ("session_name", "session_id", "window_id", "window_index", "pane_id", "pane_index")
-    return dict(zip(keys, parts))
+    return parse_location(res.stdout)
+
+
+def pane_locations() -> dict[str, dict]:
+    """Where every pane on the server is right now, by pane id, in one call.
+
+    Pane ids are the one thing about a pane that never changes: join-pane,
+    break-pane and move-window all carry them along. Everything else here can
+    change under a running session, which is why it is looked up, not trusted.
+    """
+    res = tmux("list-panes", "-a", "-F", LOCATION_FORMAT)
+    if res.returncode != 0:
+        return {}
+    out = {}
+    for line in res.stdout.splitlines():
+        loc = parse_location(line)
+        if loc:
+            out[loc["pane_id"]] = loc
+    return out
 
 
 def live_panes() -> set[str]:
-    res = tmux("list-panes", "-a", "-F", "#{pane_id}")
-    if res.returncode != 0:
-        return set()
-    return set(res.stdout.split())
+    return set(pane_locations())
 
 
 def pane_exists(pane_id: str | None, panes: set[str] | None = None) -> bool:
@@ -508,6 +573,41 @@ def window_named(pane: str, name: str):
                 tmux("set-window-option", "-u", "-t", pane, "automatic-rename")
 
 
+def pane_marks(session: dict) -> dict[str, str]:
+    """The pane options that say what is running in a session's pane.
+
+    tmux keeps them with the pane wherever it moves, and hands them out with
+    every list-panes, so anything reading the server learns which pane is which
+    without a second source to ask. @cwd is the session's directory, which
+    tmux's own pane_current_path cannot be trusted to know: that follows the
+    foreground process, and a process can move.
+    """
+    marks = {
+        "@ais_id": session.get("id") or "",
+        "@ais_profile": session.get("profile") or session.get("harness") or "",
+        "@ais_desc": session.get("description") or "",
+        "@cwd": session.get("cwd") or "",
+    }
+    return {k: v for k, v in marks.items() if v}
+
+
+@contextmanager
+def pane_marked(pane: str, session: dict):
+    """Mark the pane for as long as the session runs, and unmark it after.
+
+    Unset rather than restored: the marks only ever describe a running session,
+    and a shell left behind in the pane is not one.
+    """
+    marks = pane_marks(session)
+    for key, value in marks.items():
+        tmux("set-option", "-p", "-t", pane, key, value)
+    try:
+        yield
+    finally:
+        for key in marks:
+            tmux("set-option", "-p", "-u", "-t", pane, key)
+
+
 def tmux_label(session: dict) -> str:
     loc = session.get("tmux") or {}
     if not loc:
@@ -521,11 +621,13 @@ def jump_to(session: dict, client: str | None = None) -> int:
     client names the client to move, for callers that know it better than tmux
     can infer it; see resolve_client, which is how cmd_select comes by one.
     """
-    loc = session.get("tmux") or {}
-    pane_id = loc.get("pane_id")
+    pane_id = (session.get("tmux") or {}).get("pane_id")
     if not pane_id:
         die(f"session {session['id']} has no recorded tmux location")
-    if not pane_exists(pane_id):
+    # Where the pane is now, not where it started: panes move between windows
+    # and sessions, and the recorded session would be the wrong one to visit.
+    loc = capture_tmux_location(pane_id)
+    if loc is None or loc.get("pane_id") != pane_id:
         die(f"tmux pane {pane_id} for session {session['id']} is gone")
 
     target_session = loc.get("session_id") or loc.get("session_name")
@@ -572,13 +674,15 @@ def reap(sessions: list[dict]) -> int:
     if not candidates:
         return 0
 
-    panes = live_panes()  # one tmux call for the whole sweep
+    panes = pane_locations()  # one tmux call for the whole sweep
     reaped = 0
     for s in candidates:
         pid = s.get("pid")
         loc = s.get("tmux") or {}
         # pids get reused, so require both signals before declaring death
         if process_alive(pid) and pane_exists(loc.get("pane_id"), panes):
+            # Still running; keep the record up with wherever the pane is now.
+            s["tmux"] = {**loc, **panes[loc["pane_id"]]}
             continue
         s["status"] = "dead"
         s["ended_at"] = s.get("ended_at") or now_iso()
@@ -713,6 +817,18 @@ def deliver_desktop(title: str, message: str, sound: str) -> tuple[bool, str | N
     return False, f"no notification backend for {sys.platform}"
 
 
+def notification_id() -> str:
+    """A notification's id: unique, and sorting by it is sorting by time.
+
+    Microseconds since the epoch in fixed-width hex, then a little noise for two
+    notifications in the same microsecond. Fixed width is what makes plain
+    string comparison chronological, so "everything after id X" (ais state
+    --since) needs no clock parsing on either side.
+    """
+    stamp = f"{time.time_ns() // 1000:014x}"
+    return stamp + "".join(secrets.choice(ID_ALPHABET) for _ in range(4))
+
+
 def record_notification(sid: str, entry: dict) -> bool:
     """Append entry to sid's notification list; returns False if sid is unknown."""
     def apply(sessions):
@@ -761,6 +877,7 @@ def cmd_notify(args):
         delivered, error = deliver_desktop(title, message, sound)
 
     entry = {
+        "id": notification_id(),
         "at": now_iso(),
         "message": message,
         "delivered": delivered,
@@ -807,7 +924,7 @@ def repo_root(path) -> Path | None:
     return Path(common).parent if common else None
 
 
-def worktree_root(requested: bool | None, auto: bool) -> Path | None:
+def worktree_root(requested: bool | None, auto: bool, cwd: str | None = None) -> Path | None:
     """The repo a new session should branch from, or None to run where we are.
 
     requested is what the command line said: True for -w, False for
@@ -819,9 +936,10 @@ def worktree_root(requested: bool | None, auto: bool) -> Path | None:
     """
     if requested is False or (requested is None and not auto):
         return None
-    root = repo_root(os.getcwd())
+    cwd = cwd or os.getcwd()
+    root = repo_root(cwd)
     if root is None and requested:
-        die(f"-w needs a git repository; {tilde(os.getcwd())} is not in one")
+        die(f"-w needs a git repository; {tilde(cwd)} is not in one")
     return root
 
 
@@ -1015,11 +1133,15 @@ def cmd_run(args, harness_argv: list[str]):
     config = load_config()
     pane = require_tmux()
 
+    if getattr(args, "fork", None):
+        return run_fork(args, config, pane, harness_argv)
+
     harness = harness_argv[0]
     settings = harness_settings(config, harness)
     harness_args = harness_argv[1:]
+    cwd = run_directory(args)
 
-    root = worktree_root(args.worktree, settings["worktree"]["auto"])
+    root = worktree_root(args.worktree, settings["worktree"]["auto"], cwd)
 
     # Mint the conversation id here rather than discovering it later: known
     # before the child exists, it lands in the record in the same write as
@@ -1043,14 +1165,15 @@ def cmd_run(args, harness_argv: list[str]):
     session = {
         "id": None,  # assigned and appended under a single lock below
         "description": args.description,
-        "harness": harness,
+        "profile": harness,
+        "harness": harness,  # the profile's old name, still read by older ais
         "command": argv,
         "harness_args": harness_args,  # what restart replays, minus ais's own flags
         "session_ids": [sid] if sid else [],
         "status": "active",
         "pid": None,  # filled in once the child exists
         "hostname": socket.gethostname(),
-        "cwd": os.getcwd(),
+        "cwd": cwd,
         "tmux": location,
         "started_at": now_iso(),
         "ended_at": None,
@@ -1061,6 +1184,94 @@ def cmd_run(args, harness_argv: list[str]):
         # the path out of; never stored on the record.
         session["worktree_request"] = {"root": str(root), "repo": repo_name(root)}
     return launch(session, argv, settings, dry_run=args.dry_run)
+
+
+def run_directory(args) -> str:
+    """Where a new session starts: --cwd if given, else right here."""
+    wanted = getattr(args, "cwd", None)
+    if not wanted:
+        return os.getcwd()
+    path = Path(os.path.expanduser(wanted)).absolute()
+    if not path.is_dir():
+        die(f"--cwd {tilde(path)} is not a directory")
+    return str(path)
+
+
+def run_fork(args, config: dict, pane: str, extra: list[str]) -> int:
+    """Start a copy of a session: same profile, place and work, a new conversation.
+
+    The copy is its own session, running beside the one it came from rather
+    than instead of it, so unlike restart the source may well be alive. It
+    shares the directory, name and worktree — two agents on one piece of work —
+    and branches the conversation through the profile's session.fork template.
+    """
+    source = pick_session(read_sessions(), args.fork)
+    host = socket.gethostname()
+    if source.get("hostname") != host:
+        die(
+            f"session {source['id']} ran on {source.get('hostname', '?')}, not {host}; "
+            "its conversation lives on that machine"
+        )
+    profile = session_profile(source)
+    if extra and extra[0] != profile:
+        die(f"session {source['id']} is a {profile} session, not {extra[0]}")
+    settings = harness_settings(config, profile)
+    conf = settings["session"]
+    conversation = harness_session_id(source)
+    if not (conf and conf["fork"]):
+        die(f"no session.fork configured for {profile}; nothing to fork with")
+    if not conversation:
+        die(f"session {source['id']} has no known {profile} conversation to fork")
+
+    cwd = run_directory(args) if getattr(args, "cwd", None) else source.get("cwd") or ""
+    if not Path(cwd).is_dir():
+        die(f"{tilde(cwd) or 'its directory'} is gone; nothing to fork into")
+
+    harness_args = list(source.get("harness_args") or []) + list(extra[1:])
+    argv = (
+        settings["command"] + settings["flags"]
+        + session_argv(conf["fork"], conversation) + harness_args
+    )
+    location = capture_tmux_location(pane)
+    if location is None:
+        die(f"could not read the tmux location of pane {pane}")
+
+    session = {
+        "id": None,
+        "description": args.description or source.get("description"),
+        "slug": source.get("slug"),          # same work, so the same name...
+        "worktree": source.get("worktree"),  # ...and the same worktree
+        "profile": profile,
+        "harness": profile,
+        "command": argv,
+        "harness_args": harness_args,
+        "session_ids": [],  # the harness names the branch; its hook reports it
+        "fork_of": source["id"],
+        "status": "active",
+        "pid": None,
+        "hostname": host,
+        "cwd": cwd,
+        "tmux": location,
+        "started_at": now_iso(),
+        "ended_at": None,
+        "exit_code": None,
+    }
+    note(f"forking {source['id']} ({elide(describe(source), 48)}) from {conversation}")
+    return launch(session, argv, settings, dry_run=args.dry_run)
+
+
+def session_profile(session: dict) -> str:
+    return session.get("profile") or session.get("harness") or ""
+
+
+def pick_session(sessions: list[dict], wanted: str) -> dict:
+    """The one session whose id starts with wanted, or die saying why not."""
+    matches = [s for s in sessions if s.get("id", "").startswith(wanted)]
+    if not matches:
+        die(f"no session with id starting {wanted!r}")
+    if len(matches) > 1:
+        die(f"{wanted!r} matches {len(matches)} sessions")
+    return matches[0]
 
 
 def launch(session: dict, argv: list[str], settings: dict, dry_run: bool) -> int:
@@ -1094,6 +1305,7 @@ def launch(session: dict, argv: list[str], settings: dict, dry_run: bool) -> int
     env = os.environ.copy()
     env.update(settings["env"])
     env["AIS_SESSION"] = session["id"]
+    env["AIS_PROFILE"] = harness
     env["AIS_HARNESS"] = harness
     if session.get("description"):
         env["AIS_SESSION_DESCRIPTION"] = session["description"]
@@ -1109,6 +1321,7 @@ def launch(session: dict, argv: list[str], settings: dict, dry_run: bool) -> int
         for key, value in sorted(settings["env"].items()):
             print(f"env:     {key}={value}")
         print(f"env:     AIS_SESSION={session['id']}")
+        print(f"env:     AIS_PROFILE={harness}")
         print(f"env:     AIS_HARNESS={harness}")
         if session.get("description"):
             print(f"env:     AIS_SESSION_DESCRIPTION={session['description']}")
@@ -1130,7 +1343,17 @@ def launch(session: dict, argv: list[str], settings: dict, dry_run: bool) -> int
         if settings["rename_window"] and pane
         else nullcontext(False)
     )
-    with naming:
+    marked = pane_marked(pane, session) if pane else nullcontext()
+    # ais stands in the session's directory itself, not just its child: tmux
+    # reports the directory of the pane's foreground process group, which ais
+    # leads, so a split next to the agent would otherwise open wherever ais was
+    # started rather than in the agent's worktree.
+    try:
+        os.chdir(session["cwd"])
+    except OSError as exc:
+        finish(session["id"], 126)
+        die(f"cannot enter {tilde(session['cwd'])}: {exc}")
+    with naming, marked:
         try:
             child = subprocess.Popen(argv, env=env, executable=exe, cwd=session["cwd"])
         except OSError as exc:
@@ -1364,12 +1587,7 @@ def session_seen(args) -> int:
 def pick_restartable(sessions: list[dict], wanted: str | None) -> dict:
     """The session ais restart should revive, or die trying to choose."""
     if wanted:
-        matches = [s for s in sessions if s.get("id", "").startswith(wanted)]
-        if not matches:
-            die(f"no session with id starting {wanted!r}")
-        if len(matches) > 1:
-            die(f"{wanted!r} matches {len(matches)} sessions")
-        return matches[0]
+        return pick_session(sessions, wanted)
 
     # No id: the last thing that died here, which is nearly always the session
     # whose pane you are standing in.
@@ -1412,7 +1630,7 @@ def cmd_restart(args):
     if not Path(cwd).is_dir():
         die(f"{tilde(cwd) or 'its directory'} is gone; nothing to restart into")
 
-    harness = target.get("harness") or ""
+    harness = session_profile(target)
     settings = harness_settings(config, harness)
     conf = settings["session"]
     harness_args = target.get("harness_args")
@@ -1451,6 +1669,7 @@ def cmd_restart(args):
         "description": target.get("description"),
         "slug": target.get("slug"),  # deliberately shared: same work, same worktree
         "worktree": target.get("worktree"),  # and literally the same one: cwd is in it
+        "profile": harness,
         "harness": harness,
         "command": argv,
         "harness_args": list(harness_args),
@@ -1925,6 +2144,147 @@ def cmd_preview(args):
     return 0
 
 
+# ---------------------------------------------------------------- api
+
+# What "ais state" and "ais env" print is a contract with other programs (tsm
+# first among them), not a dump of sessions.json: the record can change shape
+# whenever ais needs it to, this cannot without bumping API_VERSION. Readers
+# must ignore keys they do not know, so adding one is not a breaking change.
+API_VERSION = 1
+
+
+def public_notification(n: dict) -> dict:
+    out = {
+        "at": n.get("at"),
+        "message": n.get("message", ""),
+        "delivered": bool(n.get("delivered")),
+        "suppressed": bool(n.get("suppressed")),
+    }
+    if n.get("id"):
+        out["id"] = n["id"]
+    return out
+
+
+def public_session(s: dict, config: dict, host: str) -> dict:
+    """One session as the API presents it."""
+    profile = session_profile(s)
+    conf = harness_settings(config, profile)["session"] if profile else None
+    conversation = harness_session_id(s)
+    here = s.get("hostname") == host
+    alive = s.get("status") == "active"
+    cwd = s.get("cwd") or ""
+    wt = s.get("worktree") or {}
+    return {
+        "id": s.get("id"),
+        "profile": profile,
+        "description": s.get("description") or "",
+        "name": s.get("slug") or "",
+        "status": "active" if alive else "dead",
+        "host": s.get("hostname"),
+        "cwd": cwd,
+        "worktree": {k: wt[k] for k in ("base", "initial", "branch") if wt.get(k)},
+        "tmux": dict(s.get("tmux") or {}),
+        "pid": s.get("pid"),
+        "started_at": s.get("started_at"),
+        "ended_at": s.get("ended_at"),
+        "exit_code": s.get("exit_code"),
+        "conversation": conversation,
+        "restart_of": s.get("restart_of"),
+        "fork_of": s.get("fork_of"),
+        # What can be done with it from here, so a caller need not re-derive
+        # ais's rules: restart needs it dead, local and with somewhere to go
+        # back to; resuming the conversation, and forking it, need the
+        # profile to know how.
+        "can_restart": not alive and here and bool(cwd) and Path(cwd).is_dir(),
+        "can_resume": bool(conversation and conf and conf["resume"]),
+        "can_fork": here and bool(conversation and conf and conf["fork"]),
+        "notifications": [
+            public_notification(n) for n in notifications_of(s) if isinstance(n, dict)
+        ],
+    }
+
+
+def public_profile(name: str, config: dict) -> dict:
+    settings = harness_settings(config, name)
+    conf = settings["session"]
+    return {
+        "name": name,
+        "command": settings["command"],
+        "flags": settings["flags"],
+        "resumable": bool(conf and conf["resume"]),
+        "forkable": bool(conf and conf["fork"]),
+    }
+
+
+def emit_json(payload: dict) -> int:
+    json.dump({"api": API_VERSION, **payload}, sys.stdout, indent=2)
+    sys.stdout.write("\n")
+    return 0
+
+
+def cmd_state(args):
+    """Every profile and session, as JSON: the one read other programs make.
+
+    Sessions are reaped first, so "active" means running right now and the
+    tmux location is where the pane is now. --since keeps only notifications
+    newer than the given id, and only the sessions that have one.
+    """
+    config = load_config()
+    sessions = mutate_sessions(lambda ss: (reap(ss), ss)[1])
+    if args.active:
+        sessions = [s for s in sessions if s.get("status") == "active"]
+    sessions.sort(key=lambda s: s.get("started_at") or "", reverse=True)
+
+    host = socket.gethostname()
+    out = [public_session(s, config, host) for s in sessions]
+    if args.since:
+        for item in out:
+            item["notifications"] = [
+                n for n in item["notifications"] if (n.get("id") or "") > args.since
+            ]
+        out = [item for item in out if item["notifications"]]
+
+    wt = worktree_settings(config)
+    return emit_json({
+        "host": host,
+        "worktree": {"base": str(wt["base"]), "auto": wt["auto"]},
+        "notify_window": notify_settings()["window"],
+        "profiles": [public_profile(name, config) for name in profile_names(config)],
+        "sessions": out,
+    })
+
+
+def sibling_env(session: dict, config: dict) -> dict[str, str]:
+    """What a plain shell beside this session needs to be in the same place.
+
+    The profile's own env, so whatever it sets up (a venv, a PORT) is there
+    too, and where the session's worktrees are, so "ais wt" style paths line
+    up. Deliberately not AIS_SESSION: a shell beside an agent is not that agent,
+    and anything it notifies or starts should not be filed under it.
+    """
+    env = dict(harness_settings(config, session_profile(session))["env"])
+    wt = session.get("worktree") or {}
+    if wt.get("base"):
+        env["AIS_WORKTREE_BASE"] = wt["base"]
+    if wt.get("initial"):
+        env["AIS_WORKTREE"] = wt["initial"]
+    return env
+
+
+def cmd_env(args):
+    """Where a session runs and the env beside it: JSON, or shell to eval."""
+    config = load_config()
+    session = pick_session(read_sessions(), args.id)
+    cwd = session.get("cwd") or ""
+    env = sibling_env(session, config)
+    if args.json:
+        return emit_json({"id": session["id"], "cwd": cwd, "env": env})
+    print(f"cd {shlex.quote(cwd)}")
+    for key, value in sorted(env.items()):
+        print(f"export {key}={shlex.quote(value)}")
+    return 0
+
+
 # ---------------------------------------------------------------- ls / prune / current
 
 def cmd_ls(args):
@@ -2062,10 +2422,11 @@ def retire_worktrees(dropped: list[dict], kept: list[dict]) -> None:
 CLAUDE_SESSION_CONFIG = '''
 # Added by "ais install --harness claude": how claude names conversations, so
 # "ais restart" can pick one up again.
-[harness.claude.session]
+[profile.claude.session]
 id = "uuid4"
 new = ["--session-id", "{id}"]
 resume = ["--resume", "{id}"]
+fork = ["--resume", "{id}", "--fork-session"]
 conflicts = ["-c", "--continue", "--fork-session"]
 '''
 
@@ -2073,7 +2434,7 @@ PI_SESSION_CONFIG = '''
 # Added by "ais install --harness pi": how pi names conversations, so "ais
 # restart" can pick one up again. pi's --session-id opens the session with that
 # id and creates one when there is none, so a single flag serves both.
-[harness.pi.session]
+[profile.pi.session]
 id = "uuid4"
 new = ["--session-id", "{id}"]
 resume = ["--session-id", "{id}"]
@@ -2181,8 +2542,9 @@ Interacting with ais:
   running or which session is which.
 - NEVER run `ais select`. It switches my tmux client to another session's pane,
   yanking my view away from wherever I am. That command is mine.
-- NEVER start a session yourself — no `ais -- {harness}` (that nests a harness
-  inside this one) and no launching an agent harness directly.
+- NEVER start a session yourself — no `ais run`, no `ais -- {harness}` (that
+  nests a harness inside this one), no `ais run --fork`, and no launching an
+  agent harness directly.
 - NEVER run `ais restart`. It takes over the pane it runs in and puts another
   agent back to work; deciding that is mine.
 - `ais wt add`, `ais wt ls` and `ais wt path` are yours to run whenever the
@@ -2279,12 +2641,14 @@ def install_config(harness: str, block: str, dry: bool) -> None:
     """Teach ais's own config how a harness names conversations."""
     load_config()  # writes the starter config when there is none
     text = CONFIG_PATH.read_text()
-    table = f"[harness.{harness}.session]"
+    table = f"[profile.{harness}.session]"
     # The starter config ships the table commented out as documentation, so
-    # only a live one counts as already installed.
-    if re.search(rf"^\s*{re.escape(table)}", text, re.MULTILINE):
-        report("unchanged", CONFIG_PATH, f"{table} already set")
-        return
+    # only a live one counts as already installed — under either spelling,
+    # since a config from before profiles has it as [harness.*].
+    for spelling in (table, f"[harness.{harness}.session]"):
+        if re.search(rf"^\s*{re.escape(spelling)}", text, re.MULTILINE):
+            report("unchanged", CONFIG_PATH, f"{spelling} already set")
+            return
     if dry:
         report("would add", CONFIG_PATH, table)
         return
@@ -2470,21 +2834,30 @@ def cmd_current(args):
 
 # ---------------------------------------------------------------- cli
 
-USAGE = f"""usage: {PROG} [options] -- <harness> [harness args...]
+USAGE = f"""usage: {PROG} run <profile> [options] [-- profile args...]
+       {PROG} [options] -- <profile> [profile args...]
        {PROG} <command> [options]
 
 run:
-  {PROG} -- claude                     start claude in a tracked session
-  {PROG} -- pi                         ...or pi, or any harness in config.toml
-  {PROG} -d "fix the auth bug" -- claude
-  {PROG} -w -d "fix the auth bug" -- claude    ...in a worktree of its own
+  {PROG} run claude                    start claude in a tracked session
+  {PROG} -- claude                     ...the same, abbreviated
+  {PROG} run pi                        ...or pi, or any profile in config.toml
+  {PROG} run claude -w -d "fix the auth bug" -- --model opus
   -d, --description TEXT             what this session is for; shown by select
   -w, --worktree                     make a git worktree of the repo you are in
                                      at <base>/<session name>/<repo>, on a
-                                     branch of that name, and start the harness
+                                     branch of that name, and start the profile
                                      there. Fails if this is not a repo.
       --no-worktree                  run here, even with worktree.auto on
+      --cwd DIR                      start in DIR rather than here
+      --fork ID                      start a copy of session ID beside it: same
+                                     profile, directory and worktree, with its
+                                     conversation forked (needs session.fork)
   -n, --dry-run                      print the command and env, run nothing
+
+  A profile is a named way to start a process — command, flags, env and, for
+  agent harnesses, how to resume a conversation — under [profile.<name>] in
+  config.toml. [harness.<name>] is the old spelling and still works.
 
 commands:
   select [id]      pick an active session and switch tmux to its pane;
@@ -2517,6 +2890,14 @@ commands:
                    telling the agent how to use ais from inside a session.
                    --harness claude|pi (default claude), -n/--dry-run,
                    --force to rewrite wiring ais did not write itself.
+  state            every profile and session as JSON, for other programs (tsm):
+                   what is running, where its pane is now, what can be
+                   restarted, resumed or forked, and its notifications.
+                   --active drops dead sessions; --since ID keeps only
+                   notifications newer than ID. Versioned by its "api" key.
+  env <id>         where a session runs and the env a shell beside it needs:
+                   shell to eval, or --json. Not AIS_SESSION: the shell is not
+                   the agent.
   wt <cmd>         worktrees for this session, all under one directory:
                      add [repo]   worktree of repo (default: here) at
                                   <base>/<session name>/<repo>; prints the path
@@ -2543,9 +2924,14 @@ worktrees:
 
 tmux:
   A session renames its window after itself while it runs — the session name,
-  else the harness — and puts the old name back when it ends; otherwise tmux
+  else the profile — and puts the old name back when it ends; otherwise tmux
   names every window after the process it sees, which is ais, which is Python.
   Turn it off with rename = false under [tmux] in config.toml.
+
+  It also marks its pane with @ais_id, @ais_profile, @ais_desc and @cwd while
+  it runs, and stands in the session's directory itself, so #{{pane_current_path}}
+  — and every split made with -c "#{{pane_current_path}}" — lands in the agent's
+  worktree rather than wherever ais was started.
 
   bind-key a display-popup -E -w 80% -h 60% -T " ais " \\
     "{tilde(Path(__file__).resolve())} select"
@@ -2571,28 +2957,51 @@ def split_argv(argv: list[str]) -> tuple[list[str], list[str] | None]:
     return argv[:at], argv[at + 1:]
 
 
+def run_parser() -> argparse.ArgumentParser:
+    """The flags a session start takes, whether it came as "run" or "--"."""
+    parser = argparse.ArgumentParser(prog=PROG, add_help=False)
+    parser.add_argument("-d", "--description", default=None)
+    # Three states, not two: -w, --no-worktree, and said nothing — which is
+    # the only one worktree.auto gets to decide.
+    parser.add_argument(
+        "-w", "--worktree", action=argparse.BooleanOptionalAction, default=None,
+    )
+    parser.add_argument("--cwd", default=None, metavar="DIR")
+    parser.add_argument("--fork", default=None, metavar="ID")
+    parser.add_argument("-n", "--dry-run", action="store_true")
+    parser.add_argument("-h", "--help", action="store_true")
+    return parser
+
+
+def start_session(ais_args: list[str], harness_argv: list[str]) -> int:
+    args, unknown = run_parser().parse_known_args(ais_args)
+    if args.help:
+        print(USAGE, end="")
+        return 0
+    if unknown:
+        die(f"unknown option(s): {' '.join(unknown)}")
+    if args.fork and args.worktree:
+        die("--fork runs in the session's own directory; -w has nothing to do there")
+    if not harness_argv and not args.fork:
+        die(f"name the profile to start, e.g. {PROG} run claude")
+    return cmd_run(args, harness_argv)
+
+
 def main(argv: list[str]) -> int:
     ais_args, harness_argv = split_argv(argv)
 
+    # "ais run <profile> [flags] [-- args]" and "ais [flags] -- <profile> [args]"
+    # are one command. The first spells out what the second abbreviates, and
+    # has room for the profile to be left out where --fork implies it.
+    if ais_args[:1] == ["run"]:
+        rest = ais_args[1:]
+        profile = [rest.pop(0)] if rest and not rest[0].startswith("-") else []
+        return start_session(rest, profile + (harness_argv or []))
+
     if harness_argv is not None:
         if not harness_argv:
-            die("nothing after '--': name the agent harness, e.g. ais -- claude")
-        parser = argparse.ArgumentParser(prog=PROG, add_help=False)
-        parser.add_argument("-d", "--description", default=None)
-        # Three states, not two: -w, --no-worktree, and said nothing — which is
-        # the only one worktree.auto gets to decide.
-        parser.add_argument(
-            "-w", "--worktree", action=argparse.BooleanOptionalAction, default=None,
-        )
-        parser.add_argument("-n", "--dry-run", action="store_true")
-        parser.add_argument("-h", "--help", action="store_true")
-        args, unknown = parser.parse_known_args(ais_args)
-        if args.help:
-            print(USAGE, end="")
-            return 0
-        if unknown:
-            die(f"unknown option(s) before '--': {' '.join(unknown)}")
-        return cmd_run(args, harness_argv)
+            die("nothing after '--': name the profile, e.g. ais -- claude")
+        return start_session(ais_args, harness_argv)
 
     if not ais_args or ais_args[0] in ("-h", "--help", "help"):
         print(USAGE, end="")
@@ -2600,7 +3009,7 @@ def main(argv: list[str]) -> int:
 
     commands = (
         "select", "ls", "status", "notify", "prune", "current", "name",
-        "restart", "install", "wt", "_preview", "_session-seen",
+        "restart", "install", "wt", "state", "env", "_preview", "_session-seen",
     )
     if ais_args[0] not in commands:
         hint = f"; to run a harness, separate it with '--': {PROG} -- {shlex.join(ais_args)}"
@@ -2659,10 +3068,21 @@ def main(argv: list[str]) -> int:
     p_restart.set_defaults(fn=cmd_restart)
 
     p_install = subs.add_parser("install", add_help=False)
-    p_install.add_argument("--harness", default="claude")
+    p_install.add_argument("--harness", "--profile", dest="harness", default="claude")
     p_install.add_argument("-n", "--dry-run", action="store_true")
     p_install.add_argument("--force", action="store_true")
     p_install.set_defaults(fn=cmd_install)
+
+    p_state = subs.add_parser("state", add_help=False)
+    p_state.add_argument("--json", action="store_true")  # the only format; accepted for clarity
+    p_state.add_argument("--active", action="store_true")
+    p_state.add_argument("--since", default=None, metavar="NOTIFICATION_ID")
+    p_state.set_defaults(fn=cmd_state)
+
+    p_env = subs.add_parser("env", add_help=False)
+    p_env.add_argument("id")
+    p_env.add_argument("--json", action="store_true")
+    p_env.set_defaults(fn=cmd_env)
 
     p_preview = subs.add_parser("_preview", add_help=False)
     p_preview.add_argument("id")
