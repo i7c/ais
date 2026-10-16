@@ -184,7 +184,14 @@ How it stays fast at ~300ms round trips:
   host: a process cannot change machines.
 
 Both ends must run a tsm speaking the same protocol; a mismatch says so in
-the heading.
+the heading. Measured against a real server: the first fetch (with the ssh
+handshake) ~570ms, every later one ~190ms, a jump to a remote pane ~240ms
+until both ends have switched — while the popup's first frame stays at ~50ms,
+the remote part drawn from the cache.
+
+tmux older than 3.8 replaces control and non-ASCII characters in its
+output with `_` unless it runs in a UTF-8 locale, which commands over ssh
+usually lack; tsm gives its tmux calls `LC_CTYPE=C.UTF-8` when needed.
 
 A new shell beside an ais pane starts in the session's directory — its
 worktree — with its profile's env and `$AIS_WORKTREE`/`$AIS_WORKTREE_BASE`

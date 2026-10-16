@@ -43,6 +43,18 @@ func cacheDir() string {
 	return filepath.Join(dir, "tsm")
 }
 
+// controlPath is where the shared connection's socket lives. ssh's %C is 40
+// hex digits, and a unix socket path cannot pass ~104 bytes, so a long cache
+// directory gives way to a short private one.
+func controlPath() string {
+	dir := cacheDir()
+	if len(dir)+len("/cm-")+40 > 100 {
+		dir = filepath.Join(os.TempDir(), fmt.Sprintf("tsm-%d", os.Getuid()))
+	}
+	os.MkdirAll(dir, 0o700)
+	return filepath.Join(dir, "cm-%C")
+}
+
 // argv is how to run a command line on the remote host.
 func (r Remote) argv(line string) []string {
 	if len(r.Conf.Command) > 0 {
@@ -51,7 +63,7 @@ func (r Remote) argv(line string) []string {
 	return []string{
 		"ssh",
 		"-o", "ControlMaster=auto",
-		"-o", "ControlPath=" + filepath.Join(cacheDir(), "cm-%C"),
+		"-o", "ControlPath=" + controlPath(),
 		"-o", "ControlPersist=8h",
 		// Never ask: there is nobody to answer a prompt inside a popup.
 		"-o", "BatchMode=yes",

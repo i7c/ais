@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -21,6 +22,9 @@ func (execRunner) Run(name string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, name, args...)
+	if name == "tmux" {
+		cmd.Env = tmuxEnv(os.Environ())
+	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {
@@ -33,6 +37,38 @@ func (execRunner) Run(name string, args ...string) (string, error) {
 	return stdout.String(), nil
 }
 
+// tmuxEnv makes sure tmux believes in UTF-8. Without a UTF-8 locale (the
+// usual state of a command run over ssh) tmux replaces every control
+// character in -F output with "_" — tsm's field separator included — and
+// every non-ASCII character in a name with it too.
+func tmuxEnv(env []string) []string {
+	get := func(key string) string {
+		for i := len(env) - 1; i >= 0; i-- {
+			if k, v, ok := strings.Cut(env[i], "="); ok && k == key {
+				return v
+			}
+		}
+		return ""
+	}
+	locale := get("LC_ALL")
+	if locale == "" {
+		locale = get("LC_CTYPE")
+	}
+	if locale == "" {
+		locale = get("LANG")
+	}
+	l := strings.ToLower(locale)
+	if strings.Contains(l, "utf-8") || strings.Contains(l, "utf8") {
+		return env
+	}
+	// LC_ALL wins over everything, so it is the one to set when something
+	// non-UTF-8 is in the way; otherwise the narrower LC_CTYPE will do.
+	if get("LC_ALL") != "" {
+		return append(env, "LC_ALL=C.UTF-8")
+	}
+	return append(env, "LC_CTYPE=C.UTF-8")
+}
+
 // Tmux is tsm's handle on the server: queries and the commands it sends.
 type Tmux struct{ r Runner }
 
@@ -43,7 +79,13 @@ func (t Tmux) Snapshot() (*Snapshot, error) {
 	if err != nil {
 		return nil, err
 	}
-	return ParseSnapshot(out), nil
+	snap := ParseSnapshot(out)
+	if len(snap.Sessions) == 0 && strings.Count(out, "\n") > 1 {
+		// tmux answered, with panes, and none of it parsed: a mangled
+		// separator, most likely. Saying so beats showing nothing.
+		return nil, fmt.Errorf("tmux's answer did not parse (its locale is not UTF-8?): %.80q", out)
+	}
+	return snap, nil
 }
 
 // Capture is the visible screen of a pane, colours and all.

@@ -160,3 +160,10 @@ func TestRemoteOpErrorsComeBackAsErrors(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+func TestTheControlSocketFitsInAUnixSocketPath(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", "/tmp/"+strings.Repeat("long-", 20))
+	if p := controlPath(); len(p)-len("%C")+40 > 104 {
+		t.Fatalf("%s would be too long once %%C is filled in", p)
+	}
+}

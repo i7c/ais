@@ -269,3 +269,16 @@ func TestFitIsExactlyAsWideAsAsked(t *testing.T) {
 		}
 	}
 }
+
+func TestTmuxIsToldItSpeaksUTF8(t *testing.T) {
+	last := func(env []string) string { return env[len(env)-1] }
+	if got := last(tmuxEnv([]string{"PATH=/bin"})); got != "LC_CTYPE=C.UTF-8" {
+		t.Fatalf("no locale at all (ssh): %s", got)
+	}
+	if got := tmuxEnv([]string{"LANG=en_US.UTF-8"}); len(got) != 1 {
+		t.Fatal("a UTF-8 locale is left alone")
+	}
+	if got := last(tmuxEnv([]string{"LANG=en_US.UTF-8", "LC_ALL=C"})); got != "LC_ALL=C.UTF-8" {
+		t.Fatalf("LC_ALL=C would win over LC_CTYPE: %s", got)
+	}
+}
