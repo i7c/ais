@@ -13,8 +13,8 @@ type Actions struct {
 }
 
 type Outcome struct {
-	Quit   bool
-	Status string
+	Quit   bool   `json:"quit"`
+	Status string `json:"status,omitempty"`
 }
 
 func (a Actions) client() string { return a.snap.Client.Name }

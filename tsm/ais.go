@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -111,6 +112,10 @@ func NewAis(r Runner) Ais {
 	if bin == "" {
 		if found, err := exec.LookPath("ais"); err == nil {
 			bin = found
+		} else if p := filepath.Join(home, ".local", "bin", "ais"); exists(p) {
+			// Where it usually is, even when a login-less ssh shell's PATH
+			// does not say so.
+			bin = p
 		}
 	}
 	return Ais{r: r, bin: bin}

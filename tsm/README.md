@@ -140,6 +140,52 @@ and you are told. Every command runs with `-d`, so nobody's view jumps.
 A new session is created with a placeholder pane (tmux has no empty
 sessions), which goes once the plan has run.
 
+## Remote hosts
+
+With tmux on your laptop, and in one of its panes an ssh or mosh connection to
+a server running tmux too, tsm shows both: the server's sessions under a
+heading of their own, its agents among "needs you", and every key working on
+its rows as on local ones.
+
+```toml
+# ~/.config/tsm/config.toml
+[[remote]]
+name = "karif"       # also the ssh destination, unless ssh = "..." says otherwise
+attach = "mosh"      # what "tsm attach karif" connects with: ssh (default) or mosh
+session = "main"     # the tmux session it attaches to there
+```
+
+Install tsm (and ais) on the server too, then connect with
+
+```
+tsm attach karif
+```
+
+instead of `mosh karif -- tmux attach`. It marks the pane as the way to karif
+and tags the tmux client it starts there, so a jump to a karif pane switches
+this pane's view there and moves your client here to this pane. A connection
+made by hand is found by its `ssh karif` / `mosh` command line; on the far end
+tsm then moves the client used last.
+
+How it stays fast at ~300ms round trips:
+
+- tsm talks to the server over an ssh connection of its own, never your
+  interactive one (mosh has no side channel). It is a ControlMaster that
+  persists for 8 hours, so after the first request each costs one round trip.
+- Every answer is cached in `~/.cache/tsm/`. The popup opens on the cache
+  — the heading says `as of 3m ago` — and replaces it when the server answers
+  (`● live`), then every few seconds while open. A server that does not
+  answer is `offline`, still shown as last seen.
+- One request fetches everything: tmux's picture, the server's ais state and
+  the directories its `n` form offers. The selected pane's screen is fetched
+  only for the selection.
+- Actions are sent as a description (`tsm _op` reads JSON) and done there by
+  the same code as here; staged moves go as one batch. Moves stay within a
+  host: a process cannot change machines.
+
+Both ends must run a tsm speaking the same protocol; a mismatch says so in
+the heading.
+
 A new shell beside an ais pane starts in the session's directory — its
 worktree — with its profile's env and `$AIS_WORKTREE`/`$AIS_WORKTREE_BASE`
 (from `ais env`), but not `$AIS_SESSION`: the shell is not the agent.

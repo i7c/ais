@@ -38,11 +38,13 @@ type createForm struct {
 	about    textinput.Model
 	focus    formField
 	anchor   *Pane
-	auto     bool // ais worktree.auto: the default for a repo
+	host     *Host // where it is made; nil for this host
+	auto     bool  // ais worktree.auto: the default for a repo
 	err      string
 }
 
-func newCreateForm(snap *Snapshot, st *AisState, anchor *Pane, aisOK bool) *createForm {
+// places are the directories to offer, or nil to look for them here.
+func newCreateForm(snap *Snapshot, st *AisState, anchor *Pane, aisOK bool, places []Place) *createForm {
 	f := &createForm{anchor: anchor, focus: fWhere}
 	if st != nil && aisOK {
 		for _, p := range st.Profiles {
@@ -79,7 +81,10 @@ func newCreateForm(snap *Snapshot, st *AisState, anchor *Pane, aisOK bool) *crea
 	f.about.Prompt = ""
 	f.about.Placeholder = "what it is for (optional)"
 
-	f.places = Places(snap, st, anchor, Roots())
+	f.places = places
+	if f.places == nil {
+		f.places = Places(snap, st, anchor, Roots())
+	}
 	f.refilter()
 	return f
 }

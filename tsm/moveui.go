@@ -14,16 +14,30 @@ type hold struct {
 	window bool
 }
 
-type movedMsg struct {
-	done, total int
-	err         error
+func hostName(r Row) string {
+	if r.Host != nil {
+		return r.Host.Name
+	}
+	return ""
+}
+
+// planBase is the picture a plan is staged against: this host's, or the
+// remote's it was started on.
+func (m *model) planBase() *Snapshot {
+	if m.planHost == "" {
+		return m.snap
+	}
+	if h := m.host(m.planHost); h != nil && h.Snap != nil {
+		return h.Snap
+	}
+	return &Snapshot{}
 }
 
 // stage is the server as the plan will leave it. An op that no longer
 // applies — something it names closed since it was staged — ends the plan
 // there; the rest goes with it, and you are told.
 func (m *model) stage() *Snapshot {
-	view, ok, err := Staged(m.snap, m.plan)
+	view, ok, err := Staged(m.planBase(), m.plan)
 	if err != nil {
 		m.plan = m.plan[:ok]
 		m.setStatus("dropped staged moves: "+err.Error(), true)
@@ -97,7 +111,7 @@ func (m *model) intoSession(op MoveOp) MoveOp {
 }
 
 func (m *model) leaveMove() {
-	m.moving, m.plan, m.holding, m.staged = false, nil, nil, nil
+	m.moving, m.plan, m.holding, m.staged, m.planHost = false, nil, nil, nil, ""
 	m.rebuild()
 }
 
@@ -118,11 +132,23 @@ func (m *model) moveKey(msg tea.KeyMsg, r Row, ok bool) (tea.Cmd, bool) {
 		if p == nil {
 			return nil, true
 		}
+		if hostName(r) != m.planHost {
+			if len(m.plan) > 0 {
+				m.setStatus("moves stay on one host: apply or discard these first", true)
+				return nil, true
+			}
+			m.planHost = hostName(r) // an empty plan goes where you start it
+			m.rebuild()
+		}
 		m.holding = &hold{pane: p.ID, window: r.Kind == RowWindow && r.Pane == nil}
 		m.setStatus("", false)
 		return nil, true
 	case "p", "P":
 		if !ok {
+			return nil, true
+		}
+		if m.holding != nil && hostName(r) != m.planHost {
+			m.setStatus("a pane cannot change machines; drop it on the host it came from", true)
 			return nil, true
 		}
 		op, err := m.drop(r, msg.String() == "P")
@@ -160,11 +186,7 @@ func (m *model) moveKey(msg tea.KeyMsg, r Row, ok bool) (tea.Cmd, bool) {
 			m.leaveMove()
 			return nil, true
 		}
-		plan, t := m.plan, m.tmux
-		return func() tea.Msg {
-			done, err := t.RunMoves(plan)
-			return movedMsg{done, len(plan), err}
-		}, true
+		return m.act(Row{Host: m.host(m.planHost)}, Op{Action: "moves", Plan: m.plan}), true
 	case "esc", "q":
 		switch {
 		case m.filter.Value() != "":
@@ -183,17 +205,6 @@ func (m *model) moveKey(msg tea.KeyMsg, r Row, ok bool) (tea.Cmd, bool) {
 		return nil, true
 	}
 	return nil, false
-}
-
-func (m *model) moved(msg movedMsg) tea.Cmd {
-	m.leaveMove()
-	switch {
-	case msg.err != nil:
-		m.setStatus(fmt.Sprintf("ran %d of %d move(s), then: %v", msg.done, msg.total, msg.err), true)
-	default:
-		m.setStatus(fmt.Sprintf("moved — %d change(s) made", msg.done), false)
-	}
-	return m.loadSnap()
 }
 
 // planLines is the right-hand panel while staging: what is held, the plan
@@ -218,7 +229,10 @@ func (m *model) planLines(w int) []string {
 		return append(lines, fg(cDim).Render("nothing staged yet"))
 	}
 	lines = append(lines, h(fmt.Sprintf("%d staged", len(m.plan))))
-	for i, d := range DescribePlan(m.snap, m.plan) {
+	if m.planHost != "" {
+		lines = append(lines, fg(cDim).Render("on "+m.planHost))
+	}
+	for i, d := range DescribePlan(m.planBase(), m.plan) {
 		lines = append(lines, fg(cDim).Render(fmt.Sprintf("%2d  ", i+1))+fg(cText).Render(d))
 	}
 	lines = append(lines, "", fg(cDim).Render("tmux"))

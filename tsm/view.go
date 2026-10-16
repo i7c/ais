@@ -82,7 +82,7 @@ func (m *model) View() string {
 		case modeHelp:
 			preview = helpLines()
 		case modeCreate:
-			preview = m.form.view(pw, bh, m.ais.Command())
+			preview = m.form.view(pw, bh, m.formAis())
 		default:
 			if m.moving {
 				preview = m.planLines(pw)
@@ -102,7 +102,7 @@ func (m *model) View() string {
 		lines := list
 		if m.mode == modeCreate {
 			lines = nil
-			for _, l := range m.form.view(m.width-2, bh, m.ais.Command()) {
+			for _, l := range m.form.view(m.width-2, bh, m.formAis()) {
 				lines = append(lines, " "+l)
 			}
 		}
@@ -139,6 +139,12 @@ func fit(line string, w int) string {
 
 func (m *model) header() string {
 	sessions, panes := m.snap.Counts()
+	for _, h := range m.remotes {
+		if h.Snap != nil {
+			s, p := h.Snap.Counts()
+			sessions, panes = sessions+s, panes+p
+		}
+	}
 	left := lipgloss.NewStyle().Bold(true).Foreground(cAccent).Render(" tsm")
 	if m.moving {
 		left += " " + lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("0")).Background(cAccent).Render(" MOVE ")
@@ -161,7 +167,11 @@ func (m *model) header() string {
 			wants++
 		}
 	}
-	right := fg(cDim).Render(fmt.Sprintf("%d panes · %d sessions", panes, sessions))
+	counts := fmt.Sprintf("%d panes · %d sessions", panes, sessions)
+	if n := len(m.remotes); n > 0 {
+		counts += fmt.Sprintf(" · %d hosts", n+1)
+	}
+	right := fg(cDim).Render(counts)
 	if wants > 0 {
 		right += fg(cDim).Render(" · ") + fg(cWant).Render(fmt.Sprintf("● %d need you", wants))
 	}
@@ -286,9 +296,9 @@ func (m *model) renderRow(r Row, selected bool, w int) string {
 	mark := " "
 	switch {
 	case r.Kind == RowHeader:
-	case r.Wants || (r.Ais != nil && r.Pane != nil && m.wants(r.Ais)):
+	case r.Wants || (r.Ais != nil && r.Pane != nil && m.wants(r)):
 		mark = st(cWant).Render("●")
-	case r.Pane != nil && r.Pane.ID == m.snap.Client.PaneID:
+	case r.Host == nil && r.Pane != nil && r.Pane.ID == m.snap.Client.PaneID:
 		mark = st(cAccent).Render("◆")
 	}
 	moved := ""
@@ -308,7 +318,7 @@ func (m *model) renderRow(r Row, selected bool, w int) string {
 	}
 	if selected {
 		mark = st(cAccent).Render("▌")
-		if r.Wants || (r.Ais != nil && r.Pane != nil && m.wants(r.Ais)) {
+		if r.Wants || (r.Ais != nil && r.Pane != nil && m.wants(r)) {
 			mark = st(cWant).Render("▌")
 		}
 	}
@@ -318,17 +328,25 @@ func (m *model) renderRow(r Row, selected bool, w int) string {
 	switch r.Kind {
 	case RowHeader:
 		t := " " + strings.ToUpper(r.Title) + " "
-		left = lipgloss.NewStyle().Foreground(cDim).Render("──") +
-			lipgloss.NewStyle().Bold(true).Foreground(cMuted).Render(t) +
-			lipgloss.NewStyle().Foreground(cDim).Render(strings.Repeat("─", max(0, w-ansi.StringWidth(t)-3)))
+		status := ""
+		if r.Host != nil && !strings.HasPrefix(r.Title, "resumable") {
+			status = m.hostStatus(r.Host)
+		}
+		titleStyle := lipgloss.NewStyle().Bold(true).Foreground(cMuted)
+		if r.Host != nil {
+			titleStyle = titleStyle.Foreground(cAccent)
+		}
+		left = lipgloss.NewStyle().Foreground(cDim).Render("──") + titleStyle.Render(t) + status
+		rest := max(0, w-ansi.StringWidth(left)-2)
+		left += lipgloss.NewStyle().Foreground(cDim).Render(" " + strings.Repeat("─", max(0, rest-1)))
 		return fit(" "+left, w)
 	case RowSession:
 		arrow := "▾"
-		if m.collapsed[r.Session.ID] && m.filter.Value() == "" {
+		if m.collapsed[collapseKey(r.Host, r.Session)] && m.filter.Value() == "" {
 			arrow = "▸"
 		}
 		name := st(cText).Bold(true)
-		if r.Session.ID == m.snap.Client.SessionID {
+		if r.Host == nil && r.Session.ID == m.snap.Client.SessionID {
 			name = st(cAccent).Bold(true)
 		}
 		left = st(cDim).Render(arrow+" ") + name.Render(r.Session.Name)
@@ -352,7 +370,11 @@ func (m *model) renderRow(r Row, selected bool, w int) string {
 			prefix = st(cDim).Render("· ")
 		}
 		if r.Wants {
-			prefix = st(cDim).Render(r.Session.Name + ":" + fmt.Sprint(r.Window.Index) + " ")
+			where := r.Session.Name + ":" + fmt.Sprint(r.Window.Index)
+			if r.Host != nil {
+				where = r.Host.Name + "/" + where
+			}
+			prefix = st(cDim).Render(where + " ")
 		}
 		if r.Pane == nil {
 			left = prefix + st(cText).Render(r.Window.Name)
@@ -395,6 +417,15 @@ func (m *model) renderRow(r Row, selected bool, w int) string {
 	return head + left + base.Render(strings.Repeat(" ", max(1, gap))) + right + base.Render(" ") + "\x1b[0m"
 }
 
+// formAis is how the form shows ais: this host's, or just "ais" on a
+// remote, which runs whatever ais it has.
+func (m *model) formAis() string {
+	if m.form != nil && m.form.host != nil {
+		return "ais"
+	}
+	return m.ais.Command()
+}
+
 func (m *model) isHeld(r Row) bool {
 	h := m.holding
 	if h == nil {
@@ -415,12 +446,35 @@ func containsPane(w *Window, id string) bool {
 	return false
 }
 
-func (m *model) wants(a *AisSession) bool {
+func (m *model) wants(r Row) bool {
 	window := 60.0
-	if m.st != nil && m.st.NotifyWindow > 0 {
-		window = m.st.NotifyWindow
+	if st := m.stateFor(r); st != nil && st.NotifyWindow > 0 {
+		window = st.NotifyWindow
 	}
-	return a.WantsYou(window, time.Now())
+	return r.Ais != nil && r.Ais.WantsYou(window, time.Now())
+}
+
+// hostStatus is how fresh a remote's picture is, for its heading.
+func (m *model) hostStatus(h *Host) string {
+	age := ""
+	if !h.At.IsZero() {
+		age = ageStr(time.Since(h.At)) + " ago"
+	}
+	switch {
+	case h.Err != nil && h.Snap == nil:
+		return fg(cWant).Render("offline: " + h.Err.Error())
+	case h.Err != nil:
+		return fg(cWant).Render("offline") + fg(cDim).Render(" · as of "+age)
+	case h.Snap == nil:
+		return fg(cDim).Render("↻ connecting…")
+	case h.Stale(time.Now()):
+		s := fg(cDim).Render("as of " + age)
+		if h.Loading {
+			s = fg(cDim).Render("↻ ") + s
+		}
+		return s
+	}
+	return fg(cOK).Render("●") + fg(cDim).Render(" live")
 }
 
 func (m *model) preview(w, h int) []string {
@@ -432,6 +486,9 @@ func (m *model) preview(w, h int) []string {
 	label := func(k string) string { return fg(cDim).Render(fmt.Sprintf("%-9s", k)) }
 	text := func(s string) string { return fg(cText).Render(s) }
 	var lines []string
+	if r.Host != nil {
+		lines = append(lines, fg(cAccent).Render("on "+r.Host.Name)+" "+m.hostStatus(r.Host))
+	}
 	title := func(s string) { lines = append(lines, lipgloss.NewStyle().Bold(true).Foreground(cText).Render(s)) }
 	field := func(k, v string) { lines = append(lines, label(k)+text(v)) }
 	gitLine := func(dir string) {
@@ -476,8 +533,8 @@ func (m *model) preview(w, h int) []string {
 		return nil
 	}
 	a := r.Ais
-	if a == nil && p.AisID != "" && m.st != nil {
-		a = m.st.ByID()[p.AisID]
+	if st := m.stateFor(r); a == nil && p.AisID != "" && st != nil {
+		a = st.ByID()[p.AisID]
 	}
 	switch {
 	case r.Kind == RowSession:
@@ -529,7 +586,7 @@ func (m *model) preview(w, h int) []string {
 					ago = ageStr(d)
 				}
 				dot := fg(cDim).Render("·")
-				if i == len(notes)-1 && m.wants(a) {
+				if i == len(notes)-1 && m.wants(Row{Ais: a, Host: r.Host}) {
 					dot = fg(cWant).Render("●")
 				}
 				lines = append(lines, dot+" "+fg(cDim).Render(fmt.Sprintf("%-4s", ago))+" "+fg(cMuted).Render(n.Message))
@@ -540,7 +597,7 @@ func (m *model) preview(w, h int) []string {
 
 	room := h - len(lines)
 	if room > 0 {
-		screen := strings.Split(strings.TrimRight(m.captures[p.ID], "\n "), "\n")
+		screen := strings.Split(strings.TrimRight(m.captures[captureKey(r, p)], "\n "), "\n")
 		// Trailing blank lines are the empty bottom of the screen; the last
 		// lines with something on them are the ones worth the space.
 		for len(screen) > 0 && strings.TrimSpace(ansi.Strip(screen[len(screen)-1])) == "" {

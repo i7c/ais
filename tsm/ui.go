@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
@@ -22,6 +23,8 @@ const (
 const (
 	tickEvery     = time.Second
 	stateEvery    = 5 // ticks between "ais state" reloads
+	remoteEvery   = 3 // ticks between remote refreshes
+	captureFresh  = 2 * time.Second
 	resumableShow = 8
 	gitFresh      = 10 * time.Second
 )
@@ -65,7 +68,10 @@ type model struct {
 
 	form *createForm
 
-	captures map[string]string
+	remotes  []*Host
+	planHost string            // the host a staged plan is for; "" for this one
+	captures map[string]string // by captureKey
+	captured map[string]time.Time
 	git      map[string]gitInfo
 	ticks    int
 
@@ -85,32 +91,83 @@ type (
 		st  *AisState
 		err error
 	}
-	captureMsg struct{ pane, text string }
-	gitMsg     struct {
+	captureMsg struct{ key, text string }
+	remoteMsg  struct {
+		host string
+		p    *Payload
+		err  error
+	}
+	gitMsg struct {
 		dir  string
 		info gitInfo
 	}
 	tickMsg struct{}
 	doneMsg struct {
-		out Outcome
-		err error
+		out  Outcome
+		err  error
+		host string // a remote the op ran on, to look at again
 	}
 )
 
-func newModel(t Tmux, a Ais, snap *Snapshot) *model {
+func newModel(t Tmux, a Ais, snap *Snapshot, conf Config) *model {
 	f := textinput.New()
 	f.Prompt = "/ "
 	f.Placeholder = "session, window, command, directory, description"
 	m := &model{
 		tmux: t, ais: a, snap: snap, filter: f, rename: textinput.New(),
 		collapsed: map[string]bool{}, captures: map[string]string{}, git: map[string]gitInfo{},
+		captured: map[string]time.Time{},
+	}
+	for _, rc := range conf.Remotes {
+		h := &Host{Name: rc.Name, Remote: Remote{Conf: rc}}
+		if p := h.Remote.Cached(); p != nil {
+			h.take(p) // what it looked like last time, until it answers
+		}
+		m.remotes = append(m.remotes, h)
 	}
 	m.rebuild()
 	return m
 }
 
 func (m *model) Init() tea.Cmd {
-	return tea.Batch(m.loadState(), m.selectionCmds(), tick())
+	cmds := []tea.Cmd{m.loadState(), m.selectionCmds(), tick()}
+	for _, h := range m.remotes {
+		cmds = append(cmds, m.fetch(h))
+	}
+	return tea.Batch(cmds...)
+}
+
+func (m *model) host(name string) *Host {
+	for _, h := range m.remotes {
+		if h.Name == name {
+			return h
+		}
+	}
+	return nil
+}
+
+// fetch asks a remote for its picture, unless it is already being asked.
+func (m *model) fetch(h *Host) tea.Cmd {
+	if h == nil || h.Loading {
+		return nil
+	}
+	h.Loading = true
+	r, name := h.Remote, h.Name
+	return func() tea.Msg { p, err := r.Fetch(); return remoteMsg{name, p, err} }
+}
+
+func captureKey(r Row, p *Pane) string {
+	if r.Host != nil {
+		return r.Host.Name + "|" + p.ID
+	}
+	return p.ID
+}
+
+func (m *model) stateFor(r Row) *AisState {
+	if r.Host != nil {
+		return r.Host.State
+	}
+	return m.st
 }
 
 func tick() tea.Cmd {
@@ -139,13 +196,29 @@ func (m *model) selectionCmds() tea.Cmd {
 	}
 	var cmds []tea.Cmd
 	if p := r.Target(); p != nil && r.Kind != RowResumable {
-		t, id := m.tmux, p.ID
-		cmds = append(cmds, func() tea.Msg {
-			text, _ := t.Capture(id)
-			return captureMsg{id, text}
-		})
+		key, id := captureKey(r, p), p.ID
+		switch {
+		case r.Host == nil:
+			t := m.tmux
+			cmds = append(cmds, func() tea.Msg {
+				text, _ := t.Capture(id)
+				return captureMsg{key, text}
+			})
+		case time.Since(m.captured[key]) > captureFresh:
+			// A round trip each: only for what is selected, and not again
+			// until the last one is a little old.
+			m.captured[key] = time.Now()
+			rem := r.Host.Remote
+			cmds = append(cmds, func() tea.Msg {
+				text, err := rem.Capture(id)
+				if err != nil {
+					return nil
+				}
+				return captureMsg{key, text}
+			})
+		}
 	}
-	if dir := m.rowDir(r); dir != "" {
+	if dir := m.rowDir(r); dir != "" && r.Host == nil {
 		if g, ok := m.git[dir]; !ok || time.Since(g.at) > gitFresh {
 			runner := m.tmux.r
 			cmds = append(cmds, func() tea.Msg { return gitMsg{dir, readGit(runner, dir)} })
@@ -191,11 +264,24 @@ func (m *model) selected() (Row, bool) {
 // rebuild lays the rows out again and puts the cursor back on what it was on.
 // The first time, it starts on whatever needs you, else the pane you came from.
 func (m *model) rebuild() {
-	shown := m.snap
+	shown, remotes := m.snap, m.remotes
 	if m.moving {
-		shown = m.stage()
+		view := m.stage()
+		if m.planHost == "" {
+			shown = view
+		} else {
+			remotes = nil
+			for _, h := range m.remotes {
+				if h.Name == m.planHost {
+					staged := *h
+					staged.Snap = view
+					h = &staged
+				}
+				remotes = append(remotes, h)
+			}
+		}
 	}
-	m.rows = BuildRows(shown, m.st, TreeOptions{
+	m.rows = BuildAll(shown, m.st, remotes, TreeOptions{
 		Filter: m.filter.Value(), Collapsed: m.collapsed, Now: time.Now(), Resumable: resumableShow,
 	})
 	if !m.placed {
@@ -300,9 +386,30 @@ func (m *model) setStatus(text string, isErr bool) {
 
 func (m *model) actions() Actions { return Actions{tmux: m.tmux, ais: m.ais, snap: m.snap} }
 
-func (m *model) do(fn func(Actions) (Outcome, error)) tea.Cmd {
-	acts := m.actions()
-	return func() tea.Msg { out, err := fn(acts); return doneMsg{out, err} }
+// act does op on the row's host: here, or on the remote it lives on — after
+// which, if the op moved the remote's view, ours moves to the pane that
+// remote is reached through, so you see what it did.
+func (m *model) act(r Row, op Op) tea.Cmd {
+	if r.Host == nil {
+		acts, st := m.actions(), m.st
+		return func() tea.Msg { out, err := Exec(acts, st, op); return doneMsg{out: out, err: err} }
+	}
+	h := r.Host
+	hosting := hostingPane(m.snap, h.Remote.Conf)
+	if hosting != nil {
+		op.Link = link(hosting)
+	}
+	t, client, rem, name := m.tmux, m.snap.Client.Name, h.Remote, h.Name
+	return func() tea.Msg {
+		out, err := rem.Do(op)
+		if err == nil && out.Quit {
+			if hosting == nil {
+				return doneMsg{err: fmt.Errorf("done on %s, but no pane here is connected to it: tsm attach %s", name, name), host: name}
+			}
+			err = t.Focus(client, hosting.ID)
+		}
+		return doneMsg{out: out, err: err, host: name}
+	}
 }
 
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -316,6 +423,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds := []tea.Cmd{tick(), m.loadSnap(), m.selectionCmds()}
 		if m.ticks%stateEvery == 0 {
 			cmds = append(cmds, m.loadState())
+		}
+		if m.ticks%remoteEvery == 0 {
+			for _, h := range m.remotes {
+				cmds = append(cmds, m.fetch(h))
+			}
 		}
 		return m, tea.Batch(cmds...)
 
@@ -337,18 +449,33 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case captureMsg:
-		m.captures[msg.pane] = msg.text
+		m.captures[msg.key] = msg.text
 		return m, nil
 
 	case gitMsg:
 		m.git[msg.dir] = msg.info
 		return m, nil
 
-	case movedMsg:
-		return m, m.moved(msg)
+	case remoteMsg:
+		h := m.host(msg.host)
+		if h == nil {
+			return m, nil
+		}
+		h.Loading, h.Err = false, msg.err
+		if msg.err == nil {
+			h.take(msg.p)
+		}
+		m.rebuild()
+		return m, m.selectionCmds()
 
 	case doneMsg:
+		if m.moving && msg.out.Status != "" || m.moving && msg.err != nil {
+			m.leaveMove()
+		}
 		if msg.err != nil {
+			if msg.out.Status != "" {
+				msg.err = fmt.Errorf("%s, then: %w", msg.out.Status, msg.err)
+			}
 			if m.mode == modeCreate && m.form != nil {
 				m.form.err = msg.err.Error()
 				return m, nil
@@ -360,7 +487,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 		m.setStatus(msg.out.Status, false)
-		return m, m.loadSnap()
+		return m, tea.Batch(m.loadSnap(), m.fetch(m.host(msg.host)))
 
 	case tea.MouseMsg:
 		return m, m.mouse(msg)
@@ -394,7 +521,7 @@ func (m *model) mouse(msg tea.MouseMsg) tea.Cmd {
 		}
 		if i == m.cursor {
 			r := m.rows[i]
-			return m.do(func(a Actions) (Outcome, error) { return a.Focus(r) })
+			return m.act(r, OpFor("focus", r))
 		}
 		m.cursor = i
 		m.key = m.rows[i].Key()
@@ -473,7 +600,7 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 				return nil
 			}
 			m.form.remember()
-			return m.do(func(a Actions) (Outcome, error) { return a.Create(spec) })
+			return m.act(Row{Host: m.form.host}, Op{Action: "create", Create: spec.Wire()})
 		}
 		return cmd
 	}
@@ -532,19 +659,20 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 			}
 			return nil
 		}
-		m.collapsed[r.Session.ID] = true
+		m.collapsed[collapseKey(r.Host, r.Session)] = true
 		m.rebuild()
 		return nil
 	case "l", "right":
-		if ok && r.Kind == RowSession && m.collapsed[r.Session.ID] {
-			delete(m.collapsed, r.Session.ID)
+		if ok && r.Kind == RowSession && m.collapsed[collapseKey(r.Host, r.Session)] {
+			delete(m.collapsed, collapseKey(r.Host, r.Session))
 			m.rebuild()
 			return nil
 		}
 		return m.move(1)
 	case " ":
 		if ok && r.Kind == RowSession {
-			m.collapsed[r.Session.ID] = !m.collapsed[r.Session.ID]
+			k := collapseKey(r.Host, r.Session)
+			m.collapsed[k] = !m.collapsed[k]
 			m.rebuild()
 		}
 		return nil
@@ -557,11 +685,26 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 	case "n":
 		// New things go next to the selection: that is what you were
 		// looking at when you thought of them.
+		if ok && r.Host != nil {
+			// New things on a remote go where the selection is, there.
+			var anchor *Pane
+			if r.Kind != RowResumable {
+				anchor = r.Target()
+			}
+			if r.Host.Snap == nil {
+				m.setStatus(r.Host.Name+" has not answered yet", true)
+				return nil
+			}
+			m.form = newCreateForm(r.Host.Snap, r.Host.State, anchor, r.Host.State != nil, withSelected(r.Host.Places, anchor))
+			m.form.host = r.Host
+			m.mode = modeCreate
+			return nil
+		}
 		anchor := m.snap.Pane(m.snap.Client.PaneID)
 		if ok && r.Kind != RowResumable && r.Target() != nil {
 			anchor = r.Target()
 		}
-		m.form = newCreateForm(m.snap, m.st, anchor, m.ais.Available())
+		m.form = newCreateForm(m.snap, m.st, anchor, m.ais.Available(), nil)
 		m.mode = modeCreate
 		return nil
 	case "ctrl+r":
@@ -578,17 +721,15 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		cmd, _ := m.moveKey(msg, r, ok)
 		return cmd
 	case "enter":
-		return m.do(func(a Actions) (Outcome, error) { return a.Focus(r) })
+		return m.act(r, OpFor("focus", r))
 	case "z":
-		return m.do(func(a Actions) (Outcome, error) { return a.Zoom(r) })
-	case "v":
-		return m.do(func(a Actions) (Outcome, error) { return a.Sibling(r, SplitRight) })
-	case "V":
-		return m.do(func(a Actions) (Outcome, error) { return a.Sibling(r, SplitBelow) })
-	case "t":
-		return m.do(func(a Actions) (Outcome, error) { return a.Sibling(r, NewWindow) })
+		return m.act(r, OpFor("zoom", r))
+	case "v", "V", "t":
+		op := OpFor("sibling", r)
+		op.Place = map[string]Placement{"v": SplitRight, "V": SplitBelow, "t": NewWindow}[msg.String()]
+		return m.act(r, op)
 	case "d":
-		return m.do(func(a Actions) (Outcome, error) { return a.Duplicate(r) })
+		return m.act(r, OpFor("duplicate", r))
 	case "x":
 		if r.Kind == RowResumable {
 			m.setStatus("ended sessions are ais's to drop: ais prune", false)
@@ -596,18 +737,20 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		}
 		if prompt := KillPrompt(r); prompt != "" {
 			m.askYes(prompt, func() tea.Cmd {
-				return m.do(func(a Actions) (Outcome, error) { return a.Kill(r) })
+				return m.act(r, OpFor("kill", r))
 			})
 			return nil
 		}
-		return m.do(func(a Actions) (Outcome, error) { return a.Kill(r) })
+		return m.act(r, OpFor("kill", r))
 	case "r":
 		kind, current, can := RenameTarget(r)
 		if !can {
 			return nil
 		}
 		return m.askName("rename "+kind+": ", current, func(name string) tea.Cmd {
-			return m.do(func(a Actions) (Outcome, error) { return a.Rename(r, name) })
+			op := OpFor("rename", r)
+			op.Name = name
+			return m.act(r, op)
 		})
 	}
 	return nil

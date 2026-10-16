@@ -130,21 +130,21 @@ func TestTheFormRemembersTheLastChoices(t *testing.T) {
 	st := &AisState{API: 1, Profiles: []AisProfile{{Name: "claude"}, {Name: "pi"}}}
 	st.Worktree.Auto = true
 
-	f := newCreateForm(snap, st, snap.Pane("%1"), true)
+	f := newCreateForm(snap, st, snap.Pane("%1"), true, nil)
 	if f.profile() != "claude" || !f.worktree || placements[f.place] != NewWindow {
 		t.Fatal("first time: the first profile, worktree.auto, a new window")
 	}
 	f.what, f.place = 1, 3
 	f.remember()
 
-	f = newCreateForm(snap, st, snap.Pane("%1"), true)
+	f = newCreateForm(snap, st, snap.Pane("%1"), true, nil)
 	if f.profile() != "pi" || placements[f.place] != NewSession {
 		t.Fatalf("second time: what was chosen, got %q %v", f.profile(), placements[f.place])
 	}
-	if f := newCreateForm(snap, st, nil, true); placements[f.place] != NewSession {
+	if f := newCreateForm(snap, st, nil, true, nil); placements[f.place] != NewSession {
 		t.Fatal("with nothing to put it beside, a new session is the only place")
 	}
-	if f := newCreateForm(snap, nil, nil, false); !reflect.DeepEqual(f.profiles, []string{shellProfile}) {
+	if f := newCreateForm(snap, nil, nil, false, nil); !reflect.DeepEqual(f.profiles, []string{shellProfile}) {
 		t.Fatal("without ais there is only the shell")
 	}
 }

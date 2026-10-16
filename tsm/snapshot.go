@@ -58,6 +58,7 @@ type Pane struct {
 	Profile string `json:"profile"`
 	Desc    string `json:"desc"`
 	Cwd     string `json:"cwd"`
+	Remote  string `json:"remote,omitempty"` // "tsm attach" runs here, to this remote
 
 	Window *Window `json:"-"`
 	Moved  string  `json:"-"` // staged: where it came from
@@ -97,7 +98,7 @@ var paneFields = []string{
 	"pane_id", "pane_index", "pane_active", "pane_current_command",
 	"pane_current_path", "pane_pid", "pane_title", "pane_dead",
 	"pane_width", "pane_height",
-	"@ais_id", "@ais_profile", "@ais_desc", "@cwd",
+	"@ais_id", "@ais_profile", "@ais_desc", "@cwd", "@tsm_remote",
 }
 
 var clientFields = []string{"client_name", "session_id", "pane_id", "base-index"}
@@ -166,7 +167,7 @@ func ParseSnapshot(out string) *Snapshot {
 			ID: f[9], Index: atoi(f[10]), Active: f[11] == "1", Command: f[12],
 			Path: f[13], PID: atoi(f[14]), Title: f[15], Dead: f[16] == "1",
 			Width: atoi(f[17]), Height: atoi(f[18]),
-			AisID: f[19], Profile: f[20], Desc: f[21], Cwd: f[22],
+			AisID: f[19], Profile: f[20], Desc: f[21], Cwd: f[22], Remote: f[23],
 			Window: w,
 		})
 	}

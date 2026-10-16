@@ -12,11 +12,11 @@ import (
 
 // line builds one list-panes line in tmux's field order.
 func line(sess, sname, win string, widx int, wname, pane string, pidx int, cmd, path string, marks ...string) string {
-	m := append(marks, "", "", "", "")[:4]
+	m := append(marks, "", "", "", "", "")[:5]
 	f := []string{
 		sess, sname, "1", win, fmt.Sprint(widx), wname, "1", "0", "1700000000",
 		pane, fmt.Sprint(pidx), "1", cmd, path, "42", "title", "0", "80", "24",
-		m[0], m[1], m[2], m[3],
+		m[0], m[1], m[2], m[3], m[4],
 	}
 	return strings.Join(f, sep)
 }

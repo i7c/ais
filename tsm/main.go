@@ -13,12 +13,21 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-const usage = `usage: tsm             open the manager (made for a tmux popup)
-       tsm snapshot    print every session, window and pane as JSON
+const usage = `usage: tsm                open the manager (made for a tmux popup)
+       tsm attach NAME    connect this pane to remote NAME's tmux, and
+                          mark it as the way there
+       tsm snapshot       print every session, window and pane as JSON
 
   bind-key a display-popup -E -w 90% -h 80% -T " tsm " "tsm"
 
-env: TSM_AIS names the ais to use (default: ais on PATH)
+config: ~/.config/tsm/config.toml ($TSM_CONFIG), for remotes:
+  [[remote]]
+  name = "karif"     # ssh destination too, unless ssh = "..." says otherwise
+  attach = "mosh"    # or "ssh" (default)
+  session = "main"   # the tmux session to attach to there
+
+env: TSM_AIS   the ais to use (default: ais on PATH)
+     TSM_ROOTS where repos live, colon-separated (default: ~/git)
 `
 
 func main() {
@@ -27,11 +36,32 @@ func main() {
 
 func run(args []string) int {
 	t := Tmux{r: execRunner{}}
+	conf, confErr := LoadConfig()
 	if len(args) > 0 {
 		switch args[0] {
 		case "-h", "--help", "help":
 			fmt.Print(usage)
 			return 0
+		// What another host's tsm asks of this one, over ssh.
+		case "_state":
+			return serveState(t, NewAis(execRunner{}))
+		case "_op":
+			return serveOp(t, NewAis(execRunner{}), os.Stdin)
+		case "_capture":
+			if len(args) != 2 {
+				return 2
+			}
+			return serveCapture(t, args[1])
+		case "attach":
+			if confErr != nil {
+				fmt.Fprintln(os.Stderr, "tsm:", confErr)
+				return 1
+			}
+			if len(args) != 2 {
+				fmt.Fprint(os.Stderr, usage)
+				return 2
+			}
+			return attach(t, conf, args[1])
 		case "snapshot":
 			snap, err := t.Snapshot()
 			if err != nil {
@@ -58,7 +88,10 @@ func run(args []string) int {
 		fmt.Fprintln(os.Stderr, "tsm: cannot read tmux:", err)
 		return 1
 	}
-	m := newModel(t, NewAis(execRunner{}), snap)
+	m := newModel(t, NewAis(execRunner{}), snap, conf)
+	if confErr != nil {
+		m.setStatus(confErr.Error(), true)
+	}
 	if _, err := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion()).Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "tsm:", err)
 		return 1

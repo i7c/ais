@@ -26,6 +26,7 @@ type Row struct {
 	Pane    *Pane
 	Ais     *AisSession // the ais session behind Pane, or the resumable one
 	Depth   int
+	Host    *Host  // the remote it is on; nil for this host
 	Wants   bool   // in the "needs you" section
 	Aside   string // what tells this row from another with the same title
 }
@@ -34,20 +35,23 @@ type Row struct {
 // thing while the list around it changes.
 func (r Row) Key() string {
 	prefix := ""
+	if r.Host != nil {
+		prefix = r.Host.Name + "|" // pane %1 exists on every host
+	}
 	if r.Wants {
-		prefix = "!"
+		prefix += "!"
 	}
 	switch r.Kind {
 	case RowSession:
-		return "s" + r.Session.ID
+		return prefix + "s" + r.Session.ID
 	case RowWindow:
 		return prefix + "w" + r.Window.ID
 	case RowPane:
 		return prefix + "p" + r.Pane.ID
 	case RowResumable:
-		return "r" + r.Ais.ID
+		return prefix + "r" + r.Ais.ID
 	}
-	return "h" + r.Title
+	return prefix + "h" + r.Title
 }
 
 func (r Row) Selectable() bool { return r.Kind != RowHeader }
@@ -75,9 +79,59 @@ type TreeOptions struct {
 	Resumable int // how many ended sessions to offer; all of them while filtering
 }
 
-// BuildRows lays out the list: who wants you, then every session, then the
-// sessions that ended and can be picked up again.
+// BuildRows lays out the list for this host alone: who wants you, then every
+// session, then the sessions that ended and can be picked up again.
 func BuildRows(snap *Snapshot, st *AisState, opt TreeOptions) []Row {
+	return BuildAll(snap, st, nil, opt)
+}
+
+// BuildAll lays out every host: who wants you, wherever they are, first;
+// then this host's sessions and ended ones; then each remote's, under a
+// heading of its own.
+func BuildAll(snap *Snapshot, st *AisState, remotes []*Host, opt TreeOptions) []Row {
+	wants, tree, ended := sections(snap, st, nil, opt)
+	type part struct {
+		host        *Host
+		tree, ended []Row
+	}
+	var parts []part
+	for _, h := range remotes {
+		if h.Snap == nil {
+			parts = append(parts, part{host: h})
+			continue
+		}
+		w, t, e := sections(h.Snap, h.State, h, opt)
+		wants = append(wants, w...)
+		parts = append(parts, part{h, t, e})
+	}
+
+	var rows []Row
+	if len(wants) > 0 {
+		rows = append(rows, Row{Kind: RowHeader, Title: "needs you"})
+		rows = append(rows, wants...)
+	}
+	rows = append(rows, tree...)
+	if len(ended) > 0 {
+		rows = append(rows, Row{Kind: RowHeader, Title: "resumable"})
+		rows = append(rows, ended...)
+	}
+	for _, p := range parts {
+		filtered := opt.Filter != "" && len(p.tree)+len(p.ended) == 0
+		if filtered {
+			continue // nothing there matches; the heading would only be noise
+		}
+		rows = append(rows, Row{Kind: RowHeader, Title: p.host.Name, Host: p.host})
+		rows = append(rows, p.tree...)
+		if len(p.ended) > 0 {
+			rows = append(rows, Row{Kind: RowHeader, Title: "resumable · " + p.host.Name, Host: p.host})
+			rows = append(rows, p.ended...)
+		}
+	}
+	return rows
+}
+
+// sections builds one host's rows: its callers, its tree, its ended sessions.
+func sections(snap *Snapshot, st *AisState, host *Host, opt TreeOptions) (wants, tree, ended []Row) {
 	byID := st.ByID()
 	byPane := st.ByPane()
 	window := 60.0
@@ -87,7 +141,6 @@ func BuildRows(snap *Snapshot, st *AisState, opt TreeOptions) []Row {
 	terms := strings.Fields(strings.ToLower(opt.Filter))
 	filtering := len(terms) > 0
 
-	var wants, tree []Row
 	for _, s := range snap.Sessions {
 		var body []Row
 		for _, w := range s.Windows {
@@ -103,9 +156,9 @@ func BuildRows(snap *Snapshot, st *AisState, opt TreeOptions) []Row {
 					continue
 				}
 				if a != nil && a.WantsYou(window, opt.Now) && p.ID != snap.Client.PaneID {
-					wants = append(wants, Row{Kind: RowPane, Session: s, Window: w, Pane: p, Ais: a, Depth: 1, Wants: true})
+					wants = append(wants, Row{Kind: RowPane, Session: s, Window: w, Pane: p, Ais: a, Depth: 1, Wants: true, Host: host})
 				}
-				panes = append(panes, Row{Kind: RowPane, Session: s, Window: w, Pane: p, Ais: a, Depth: 2})
+				panes = append(panes, Row{Kind: RowPane, Session: s, Window: w, Pane: p, Ais: a, Depth: 2, Host: host})
 			}
 			switch {
 			case len(panes) == 0:
@@ -115,38 +168,30 @@ func BuildRows(snap *Snapshot, st *AisState, opt TreeOptions) []Row {
 				r.Kind, r.Depth = RowWindow, 1
 				body = append(body, r)
 			default:
-				body = append(body, Row{Kind: RowWindow, Session: s, Window: w, Depth: 1})
+				body = append(body, Row{Kind: RowWindow, Session: s, Window: w, Depth: 1, Host: host})
 				body = append(body, panes...)
 			}
 		}
 		if len(body) == 0 {
 			continue
 		}
-		tree = append(tree, Row{Kind: RowSession, Session: s})
-		if !opt.Collapsed[s.ID] || filtering {
+		tree = append(tree, Row{Kind: RowSession, Session: s, Host: host})
+		if !opt.Collapsed[collapseKey(host, s)] || filtering {
 			tree = append(tree, body...)
 		}
 	}
-
-	var rows []Row
-	if len(wants) > 0 {
-		rows = append(rows, Row{Kind: RowHeader, Title: "needs you"})
-		rows = append(rows, wants...)
-	}
-	rows = append(rows, tree...)
 
 	limit := opt.Resumable
 	if filtering {
 		limit = 0
 	}
-	var ended []Row
 	labels := map[string]int{}
 	for _, a := range st.Resumable(limit) {
 		if filtering && !matches(terms, strings.ToLower(strings.Join([]string{a.Label(), a.Name, a.Profile, a.Cwd}, " "))) {
 			continue
 		}
 		labels[a.Label()]++
-		ended = append(ended, Row{Kind: RowResumable, Ais: a, Depth: 1})
+		ended = append(ended, Row{Kind: RowResumable, Ais: a, Depth: 1, Host: host})
 	}
 	for i := range ended {
 		if a := ended[i].Ais; labels[a.Label()] > 1 {
@@ -156,11 +201,15 @@ func BuildRows(snap *Snapshot, st *AisState, opt TreeOptions) []Row {
 			}
 		}
 	}
-	if len(ended) > 0 {
-		rows = append(rows, Row{Kind: RowHeader, Title: "resumable"})
-		rows = append(rows, ended...)
+	return wants, tree, ended
+}
+
+// collapseKey names a session for the collapsed set: ids repeat across hosts.
+func collapseKey(host *Host, s *Session) string {
+	if host == nil {
+		return s.ID
 	}
-	return rows
+	return host.Name + "|" + s.ID
 }
 
 func paneText(s *Session, w *Window, p *Pane, a *AisSession) string {

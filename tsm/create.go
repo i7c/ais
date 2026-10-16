@@ -126,9 +126,9 @@ func slug(s string) string {
 
 // A Place is a directory worth offering, and why.
 type Place struct {
-	Dir  string
-	Why  string // "selected", "here", "pane", "agent", "worktree", "repo", "typed"
-	Repo bool
+	Dir  string `json:"dir"`
+	Why  string `json:"why"` // "selected", "here", "pane", "agent", "worktree", "repo", "typed"
+	Repo bool   `json:"repo"`
 }
 
 // Places are the directories to offer, most likely first: where the
@@ -178,6 +178,23 @@ func Places(snap *Snapshot, st *AisState, selected *Pane, roots []string) []Plac
 	}
 	for _, dir := range repos(roots) {
 		add(dir, "repo")
+	}
+	return out
+}
+
+// withSelected puts the selection's directory first in places a remote
+// listed without knowing what would be selected.
+func withSelected(places []Place, sel *Pane) []Place {
+	if sel == nil {
+		return places
+	}
+	out := []Place{{Dir: sel.Dir(), Why: "selected", Repo: false}}
+	for _, p := range places {
+		if p.Dir == sel.Dir() {
+			out[0].Repo = p.Repo
+			continue
+		}
+		out = append(out, p)
 	}
 	return out
 }
