@@ -50,8 +50,18 @@ type model struct {
 	rename    textinput.Model
 	confirm   struct {
 		prompt string
-		row    Row
+		yes    func() tea.Cmd
 	}
+	ask struct { // what the rename field's answer is for
+		done func(string) tea.Cmd
+	}
+
+	// Staging moves: a layer over the normal list, which then shows the
+	// server as it will be once plan has run.
+	moving  bool
+	plan    []MoveOp
+	holding *hold
+	staged  *Snapshot
 
 	form *createForm
 
@@ -181,7 +191,11 @@ func (m *model) selected() (Row, bool) {
 // rebuild lays the rows out again and puts the cursor back on what it was on.
 // The first time, it starts on whatever needs you, else the pane you came from.
 func (m *model) rebuild() {
-	m.rows = BuildRows(m.snap, m.st, TreeOptions{
+	shown := m.snap
+	if m.moving {
+		shown = m.stage()
+	}
+	m.rows = BuildRows(shown, m.st, TreeOptions{
 		Filter: m.filter.Value(), Collapsed: m.collapsed, Now: time.Now(), Resumable: resumableShow,
 	})
 	if !m.placed {
@@ -266,6 +280,20 @@ func (m *model) move(delta int) tea.Cmd {
 	return m.selectionCmds()
 }
 
+func (m *model) askYes(prompt string, yes func() tea.Cmd) {
+	m.mode = modeConfirm
+	m.confirm.prompt, m.confirm.yes = prompt, yes
+}
+
+func (m *model) askName(prompt, current string, done func(string) tea.Cmd) tea.Cmd {
+	m.mode = modeRename
+	m.ask.done = done
+	m.rename.Prompt = prompt
+	m.rename.SetValue(current)
+	m.rename.CursorEnd()
+	return m.rename.Focus()
+}
+
 func (m *model) setStatus(text string, isErr bool) {
 	m.status, m.statusErr = text, isErr
 }
@@ -315,6 +343,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case gitMsg:
 		m.git[msg.dir] = msg.info
 		return m, nil
+
+	case movedMsg:
+		return m, m.moved(msg)
 
 	case doneMsg:
 		if msg.err != nil {
@@ -412,8 +443,7 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 			return nil
 		case "enter":
 			m.mode = modeNormal
-			name, row := strings.TrimSpace(m.rename.Value()), m.confirm.row
-			return m.do(func(a Actions) (Outcome, error) { return a.Rename(row, name) })
+			return m.ask.done(strings.TrimSpace(m.rename.Value()))
 		}
 		var cmd tea.Cmd
 		m.rename, cmd = m.rename.Update(msg)
@@ -422,8 +452,7 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 	case modeConfirm:
 		m.mode = modeNormal
 		if s := msg.String(); s == "y" || s == "Y" {
-			row := m.confirm.row
-			return m.do(func(a Actions) (Outcome, error) { return a.Kill(row) })
+			return m.confirm.yes()
 		}
 		m.setStatus("left alone", false)
 		return nil
@@ -451,6 +480,11 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 
 	r, ok := m.selected()
 	m.setStatus("", false)
+	if m.moving {
+		if cmd, handled := m.moveKey(msg, r, ok); handled {
+			return cmd
+		}
+	}
 	switch msg.String() {
 	case "q", "esc":
 		if m.filter.Value() != "" {
@@ -534,10 +568,15 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		return tea.Batch(m.loadSnap(), m.loadState(), m.selectionCmds())
 	}
 
-	if !ok {
-		return nil
+	if !ok || m.moving {
+		return nil // while staging, only moves act
 	}
 	switch msg.String() {
+	case "m":
+		m.moving, m.plan = true, nil
+		m.rebuild()
+		cmd, _ := m.moveKey(msg, r, ok)
+		return cmd
 	case "enter":
 		return m.do(func(a Actions) (Outcome, error) { return a.Focus(r) })
 	case "z":
@@ -556,8 +595,9 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 			return nil
 		}
 		if prompt := KillPrompt(r); prompt != "" {
-			m.mode = modeConfirm
-			m.confirm.prompt, m.confirm.row = prompt, r
+			m.askYes(prompt, func() tea.Cmd {
+				return m.do(func(a Actions) (Outcome, error) { return a.Kill(r) })
+			})
 			return nil
 		}
 		return m.do(func(a Actions) (Outcome, error) { return a.Kill(r) })
@@ -566,12 +606,9 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		if !can {
 			return nil
 		}
-		m.mode = modeRename
-		m.confirm.row = r
-		m.rename.Prompt = "rename " + kind + ": "
-		m.rename.SetValue(current)
-		m.rename.CursorEnd()
-		return m.rename.Focus()
+		return m.askName("rename "+kind+": ", current, func(name string) tea.Cmd {
+			return m.do(func(a Actions) (Outcome, error) { return a.Rename(r, name) })
+		})
 	}
 	return nil
 }

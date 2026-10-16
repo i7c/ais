@@ -92,7 +92,7 @@ func TestPlacesComeMostLikelyFirstAndOnce(t *testing.T) {
 	out := strings.Join([]string{
 		line("$1", "s", "@1", 1, "w", "%1", 1, "zsh", other),
 		line("$1", "s", "@1", 1, "w", "%2", 2, "zsh", repo),
-		clientMarker + strings.Join([]string{"/dev/pts/1", "$1", "%1"}, sep),
+		clientMarker + strings.Join([]string{"/dev/pts/1", "$1", "%1", "1"}, sep),
 	}, "\n")
 	snap := ParseSnapshot(out)
 	st := &AisState{API: 1, Host: "h"}

@@ -27,7 +27,7 @@ func fixture() *Snapshot {
 		line("$1", "soi", "@2", 2, "dev", "%2", 1, "zsh", "/home/x/dev"),
 		line("$1", "soi", "@2", 2, "dev", "%3", 2, "tofu", "/home/x/dev"),
 		line("$2", "irc", "@3", 1, "weechat", "%4", 1, "weechat", "/home/x"),
-		clientMarker + strings.Join([]string{"/dev/pts/1", "$1", "%2"}, sep),
+		clientMarker + strings.Join([]string{"/dev/pts/1", "$1", "%2", "1"}, sep),
 	}, "\n")
 	return ParseSnapshot(out)
 }

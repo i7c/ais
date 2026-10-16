@@ -10,8 +10,9 @@ import (
 // one moment, plus which client asked. It is built from a single tmux call and
 // never kept: tmux is the record, tsm only ever holds a picture of it.
 type Snapshot struct {
-	Sessions []*Session `json:"sessions"`
-	Client   Client     `json:"client"`
+	Sessions  []*Session `json:"sessions"`
+	Client    Client     `json:"client"`
+	BaseIndex int        `json:"base_index"` // where tmux starts numbering windows
 }
 
 type Client struct {
@@ -25,6 +26,7 @@ type Session struct {
 	Name     string    `json:"name"`
 	Attached int       `json:"attached"`
 	Windows  []*Window `json:"windows"`
+	Fresh    bool      `json:"-"` // staged: does not exist yet
 }
 
 type Window struct {
@@ -36,6 +38,7 @@ type Window struct {
 	Activity int64    `json:"activity"` // unix seconds of the last output in the window
 	Panes    []*Pane  `json:"panes"`
 	Session  *Session `json:"-"`
+	Moved    string   `json:"-"` // staged: where it came from
 }
 
 type Pane struct {
@@ -57,6 +60,7 @@ type Pane struct {
 	Cwd     string `json:"cwd"`
 
 	Window *Window `json:"-"`
+	Moved  string  `json:"-"` // staged: where it came from
 }
 
 // Dir is where the pane works: the directory ais says its session runs in,
@@ -96,7 +100,7 @@ var paneFields = []string{
 	"@ais_id", "@ais_profile", "@ais_desc", "@cwd",
 }
 
-var clientFields = []string{"client_name", "session_id", "pane_id"}
+var clientFields = []string{"client_name", "session_id", "pane_id", "base-index"}
 
 // clientMarker starts the one line that describes the client, so it can share
 // a single tmux invocation with the pane listing.
@@ -134,6 +138,7 @@ func ParseSnapshot(out string) *Snapshot {
 			f := strings.Split(rest, sep)
 			if len(f) == len(clientFields) {
 				snap.Client = Client{Name: f[0], SessionID: f[1], PaneID: f[2]}
+				snap.BaseIndex = atoi(f[3])
 			}
 			continue
 		}

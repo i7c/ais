@@ -58,6 +58,7 @@ is still a full tmux manager, just without the agent layer.
 | `d` | duplicate: `ais run --fork` an agent whose profile can fork, a fresh one of the same profile (same args, no new worktree) where it cannot, a shell otherwise |
 | `x` | kill the pane, window or session — asks first unless it is an idle shell |
 | `r` | rename the session or window |
+| `m` | move: pick up the selection, then rearrange and confirm (below) |
 | `n` | new: a profile or a shell, somewhere, in a new worktree or not, as a window, split or session (below) |
 | `/` | filter on session, window, command, directory and description; every word must match |
 | `j k` `tab` `h l` `g G` | move, next session, collapse/expand, top/bottom |
@@ -96,6 +97,48 @@ is still a full tmux manager, just without the agent layer.
   `⏎` starts from any field. What, place and worktree default to what you
   chose last (kept in `~/.cache/tsm/`), and the form opens on where — so
   `n`, a few letters of a repo, `⏎` is the common case.
+
+## Moving things around
+
+`m` picks up the selected pane (or a whole window, on a window row of several
+panes) and turns the list into a plan:
+
+```
+ tsm  MOVE  3 staged
+ ▾ main                        3 windows │ MOVE ──────────────────────────────
+   1 ui                              zsh │ 3 staged
++  2 lab-agent ← work:0          2 panes │  1  lab/b → beside lab agent in work:0
+     · lab agent                   sleep │  2  window work:0 lab-agent → main
++    · lab/b ← main:0.1              zsh │  3  window main:0 zsh → scratch (new)
++▾ scratch (new)               1 window │
+▌  2 lab/a ← main:0                  zsh │ tmux
+                                         │   join-pane -d -h -s %1 -t %2
+                                         │   move-window -d -s %2 -t $0:
+                                         │   new-session -d -s scratch
+                                         │   move-window -d -s %0 -t scratch:
+                                         │   kill-pane -t <placeholder in scratch>
+```
+
+| key | while moving |
+|---|---|
+| `m` | pick up the selection (again, to pick up something else) |
+| `p` | drop it beside the selected pane, in that window |
+| `P` | drop it into the selected session as a window of its own |
+| `N` | drop it into a new session (asks for the name) |
+| `u` | put down what you hold, else undo the last drop |
+| `⏎` | apply the whole plan |
+| `esc` | put down, else discard the plan (asks) |
+
+Nothing happens to tmux until `⏎`. The list shows the server as the plan
+will leave it — moved things marked `+` with where they came from, sessions
+the plan empties gone, new ones marked `(new)` — and the panel shows the plan
+in words and the tmux commands it comes to. Moves name panes by id, which
+tmux keeps through every move, so the plan still means the same thing when
+it runs; if something it names closes in the meantime, the plan is cut there
+and you are told. Every command runs with `-d`, so nobody's view jumps.
+
+A new session is created with a placeholder pane (tmux has no empty
+sessions), which goes once the plan has run.
 
 A new shell beside an ais pane starts in the session's directory — its
 worktree — with its profile's env and `$AIS_WORKTREE`/`$AIS_WORKTREE_BASE`

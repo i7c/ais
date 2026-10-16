@@ -84,6 +84,10 @@ func (m *model) View() string {
 		case modeCreate:
 			preview = m.form.view(pw, bh, m.ais.Command())
 		default:
+			if m.moving {
+				preview = m.planLines(pw)
+				break
+			}
 			preview = m.preview(pw, bh)
 		}
 		rule := fg(cRule).Render("│")
@@ -136,6 +140,15 @@ func fit(line string, w int) string {
 func (m *model) header() string {
 	sessions, panes := m.snap.Counts()
 	left := lipgloss.NewStyle().Bold(true).Foreground(cAccent).Render(" tsm")
+	if m.moving {
+		left += " " + lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("0")).Background(cAccent).Render(" MOVE ")
+		if n := len(m.plan); n > 0 {
+			left += fg(cMuted).Render(fmt.Sprintf(" %d staged", n))
+		}
+		if label := m.holdLabel(); label != "" {
+			left += fg(cDim).Render(" · holding ") + fg(cAccent).Render(label)
+		}
+	}
 	switch {
 	case m.mode == modeFilter:
 		left += "  " + m.filter.View()
@@ -174,6 +187,11 @@ func (m *model) footer() string {
 		line = " " + strings.Join([]string{
 			key("⏎", "start"), key("tab", "next"), key("←→", "choose"), key("↑↓", "pick dir"), key("esc", "cancel"),
 		}, "  ")
+	case m.moving && m.status == "":
+		line = " " + strings.Join([]string{
+			key("m", "pick up"), key("p", "join here"), key("P", "window here"), key("N", "new session"),
+			key("u", "undo"), key("⏎", "apply"), key("esc", "discard"),
+		}, "  ")
 	case m.status != "":
 		c := cOK
 		if m.statusErr {
@@ -184,7 +202,7 @@ func (m *model) footer() string {
 		line = " " + fg(cWant).Render("ais: "+m.stErr.Error())
 	default:
 		hints := []string{
-			key("⏎", "go"), key("n", "new"), key("v/V", "split"), key("t", "shell"), key("d", "dup"),
+			key("⏎", "go"), key("n", "new"), key("m", "move"), key("v/V", "split"), key("t", "shell"), key("d", "dup"),
 			key("x", "kill"), key("r", "rename"), key("z", "zoom"), key("/", "filter"), key("?", "more"),
 		}
 		if r, ok := m.selected(); ok && r.Kind == RowResumable {
@@ -217,6 +235,7 @@ func helpLines() []string {
 		k("x", "kill (asks unless it is an idle shell)"),
 		k("r", "rename the session or window"),
 		k("n", "new: profile, directory, worktree, place"),
+		k("m", "move: pick up, drop with p / P / N, ⏎ applies"),
 		k("ctrl-r", "refresh now"),
 		"",
 		fg(cDim).Render("a new shell beside an ais pane starts in its"),
@@ -272,6 +291,21 @@ func (m *model) renderRow(r Row, selected bool, w int) string {
 	case r.Pane != nil && r.Pane.ID == m.snap.Client.PaneID:
 		mark = st(cAccent).Render("◆")
 	}
+	moved := ""
+	switch {
+	case r.Pane != nil && r.Pane.Moved != "":
+		moved = r.Pane.Moved
+	case r.Window != nil && r.Window.Moved != "" && r.Kind == RowWindow:
+		moved = r.Window.Moved
+	}
+	if m.moving && r.Kind != RowHeader {
+		switch {
+		case m.isHeld(r):
+			mark = st(cAccent).Render("»")
+		case moved != "" || (r.Kind == RowSession && r.Session.Fresh):
+			mark = st(cOK).Render("+")
+		}
+	}
 	if selected {
 		mark = st(cAccent).Render("▌")
 		if r.Wants || (r.Ais != nil && r.Pane != nil && m.wants(r.Ais)) {
@@ -298,6 +332,9 @@ func (m *model) renderRow(r Row, selected bool, w int) string {
 			name = st(cAccent).Bold(true)
 		}
 		left = st(cDim).Render(arrow+" ") + name.Render(r.Session.Name)
+		if r.Session.Fresh {
+			left += st(cOK).Render(" (new)")
+		}
 		n := len(r.Session.Windows)
 		info := fmt.Sprintf("%d window", n)
 		if n != 1 {
@@ -348,11 +385,34 @@ func (m *model) renderRow(r Row, selected bool, w int) string {
 		right = st(profileColor(r.Ais.Profile)).Render(r.Ais.Profile) + st(cDim).Render(fmt.Sprintf(" %4s", ago))
 	}
 
+	if moved != "" {
+		left += st(cOK).Render(" ← " + moved)
+	}
 	head := mark + indent
 	room := w - ansi.StringWidth(head) - ansi.StringWidth(right) - 2
 	left = ansi.Truncate(left, max(0, room), "…")
 	gap := w - ansi.StringWidth(head) - ansi.StringWidth(left) - ansi.StringWidth(right) - 1
 	return head + left + base.Render(strings.Repeat(" ", max(1, gap))) + right + base.Render(" ") + "\x1b[0m"
+}
+
+func (m *model) isHeld(r Row) bool {
+	h := m.holding
+	if h == nil {
+		return false
+	}
+	if h.window {
+		return r.Kind == RowWindow && r.Window.ActivePane() != nil && containsPane(r.Window, h.pane)
+	}
+	return r.Pane != nil && r.Pane.ID == h.pane
+}
+
+func containsPane(w *Window, id string) bool {
+	for _, p := range w.Panes {
+		if p.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *model) wants(a *AisSession) bool {
