@@ -454,6 +454,52 @@ class RenderedInstructions(unittest.TestCase):
             self.assertIn("Commit often", rendered)
 
 
+class PrintedInstructions(unittest.TestCase):
+    """`ais instructions` hands the text to someone else to place.
+
+    A setup that assembles the global instructions from fragments must be able
+    to ask for this text rather than keep its own copy — that copy is what
+    drifts, which is how pi's on-disk section fell behind claude's.
+    """
+
+    def run_cmd(self, *argv):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = ais.main(["instructions", *argv])
+        return code, out.getvalue()
+
+    def test_prints_the_same_text_install_would_write(self):
+        for harness in ("claude", "pi"):
+            code, out = self.run_cmd(harness)
+            self.assertEqual(code, 0)
+            self.assertEqual(out, ais.instructions(harness))
+
+    def test_defaults_to_claude(self):
+        _, out = self.run_cmd()
+        self.assertEqual(out, ais.instructions("claude"))
+
+    def test_markers_match_what_install_writes(self):
+        """With --markers, `ais install` can later replace the section in place
+        instead of appending a second copy of it."""
+        _, out = self.run_cmd("pi", "--markers")
+        self.assertTrue(out.startswith(ais.SECTION_BEGIN))
+        self.assertTrue(out.rstrip().endswith(ais.SECTION_END))
+        self.assertEqual(out.count(ais.SECTION_BEGIN), 1)
+
+    def test_writes_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ["CLAUDE_CONFIG_DIR"] = tmp
+            try:
+                self.run_cmd("claude")
+                self.assertEqual(list(Path(tmp).iterdir()), [])
+            finally:
+                del os.environ["CLAUDE_CONFIG_DIR"]
+
+    def test_an_unknown_harness_is_refused(self):
+        with self.assertRaises(SystemExit):
+            self.run_cmd("emacs")
+
+
 class PiExtension(Quietly):
     """pi has no hook table, so ais owns a file in its extensions directory."""
 

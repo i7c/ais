@@ -2889,6 +2889,25 @@ def cmd_install(args):
     return 0
 
 
+def cmd_instructions(args):
+    """Print the house rules for a harness, for something else to place.
+
+    `ais install` writes this text into the harness's own global instructions
+    file. A setup that assembles those files from fragments of its own needs the
+    same text without the file write, and must not keep a second copy of it:
+    that copy is what drifts.
+    """
+    spec = HARNESSES.get(args.harness)
+    if spec is None:
+        known = " or ".join(sorted(HARNESSES))
+        die(f"{PROG} has instructions for {known}, not {args.harness!r}")
+    text = instructions(args.harness)
+    if args.markers:
+        text = f"{SECTION_BEGIN}\n{text}{SECTION_END}\n"
+    sys.stdout.write(text)
+    return 0
+
+
 def cmd_current(args):
     sid = os.environ.get("AIS_SESSION")
     if not sid:
@@ -2961,6 +2980,11 @@ commands:
                    telling the agent how to use ais from inside a session.
                    --harness claude|pi (default claude), -n/--dry-run,
                    --force to rewrite wiring ais did not write itself.
+  instructions [H] print the ais section of a harness's global instructions
+                   (claude or pi, default claude) instead of writing it, for a
+                   setup that assembles those files itself and must not keep a
+                   second copy of the text. --markers wraps it in the
+                   <!-- ais:begin --> … <!-- ais:end --> markers install uses.
   state            every profile and session as JSON, for other programs (tsm):
                    what is running, where its pane is now, what can be
                    restarted, resumed or forked, and its notifications.
@@ -3080,7 +3104,8 @@ def main(argv: list[str]) -> int:
 
     commands = (
         "select", "ls", "status", "notify", "prune", "current", "name",
-        "restart", "install", "wt", "state", "env", "_preview", "_session-seen",
+        "restart", "install", "instructions", "wt", "state", "env",
+        "_preview", "_session-seen",
     )
     if ais_args[0] not in commands:
         hint = f"; to run a harness, separate it with '--': {PROG} -- {shlex.join(ais_args)}"
@@ -3144,6 +3169,11 @@ def main(argv: list[str]) -> int:
     p_install.add_argument("-n", "--dry-run", action="store_true")
     p_install.add_argument("--force", action="store_true")
     p_install.set_defaults(fn=cmd_install)
+
+    p_instructions = subs.add_parser("instructions", add_help=False)
+    p_instructions.add_argument("harness", nargs="?", default="claude")
+    p_instructions.add_argument("--markers", action="store_true")
+    p_instructions.set_defaults(fn=cmd_instructions)
 
     p_state = subs.add_parser("state", add_help=False)
     p_state.add_argument("--json", action="store_true")  # the only format; accepted for clarity
