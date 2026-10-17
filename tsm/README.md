@@ -43,7 +43,10 @@ is still a full tmux manager, just without the agent layer.
   already seen, listed first so they are a few keys up. A window that rang
   the terminal bell while you were not looking joins them (weechat's default
   `beep` trigger rings it for highlights and private messages), until you
-  visit it and tmux clears the flag. Remote ones too.
+  visit it and tmux clears the flag. Remote ones too, including a bell in
+  the remote window you are showing through `tsm attach`: the remote's tmux
+  does not flag that one, but the bell reaches the connection's pane here,
+  and tsm marks the remote pane it came from.
 
 The popup opens on the pane you came from (`◆`). When that pane is your way
 to a remote, it opens on the pane you are looking at over there instead (see

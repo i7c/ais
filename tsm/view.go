@@ -454,7 +454,7 @@ func containsPane(w *Window, id string) bool {
 // its agent wants you, or its window rang the bell.
 func (m *model) calls(r Row) bool {
 	switch {
-	case r.Wants:
+	case r.Wants, r.Rang:
 		return true
 	case r.Ais != nil && r.Pane != nil && m.wants(r):
 		return true

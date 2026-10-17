@@ -297,3 +297,50 @@ func TestALinkIsReadFromTheClientsEnvironment(t *testing.T) {
 		t.Fatalf("link = %q", got)
 	}
 }
+
+// A bell from karif, rung in the window its client shows, reaches this tmux
+// only through the connection's pane: it is karif's pane that calls.
+func TestABellThroughAConnectionCallsFromTheFarEnd(t *testing.T) {
+	callers := func(h *Host) []string {
+		local := fixture()
+		local.Pane("%4").Remote = "karif"
+		local.Pane("%4").Window.Bell = true
+		var got []string
+		for _, r := range BuildAll(local, nil, []*Host{h}, TreeOptions{Now: time.Now()}) {
+			if r.Wants {
+				where := "here"
+				if r.Host != nil {
+					where = r.Host.Name
+				}
+				got = append(got, where+"|"+r.Pane.ID)
+			}
+		}
+		return got
+	}
+	karif := func(p *Payload) *Host {
+		h := &Host{Name: "karif", Remote: Remote{Conf: RemoteConf{Name: "karif"}}}
+		h.take(p)
+		return h
+	}
+
+	if got := callers(karif(karifSeen("%4"))); !reflect.DeepEqual(got, []string{"karif|%3"}) {
+		t.Fatalf("callers = %v", got)
+	}
+	old := karifSeen("%4")
+	old.Clients = nil
+	if got := callers(karif(old)); !reflect.DeepEqual(got, []string{"here|%4"}) {
+		t.Fatalf("callers = %v: not knowing where it came from, the connection rang", got)
+	}
+	m := opened(t, "%2", karifSeen("%4"))
+	m.snap.Pane("%4").Window.Bell = true
+	m.rebuild()
+	marked := false
+	for _, r := range m.rows {
+		if r.Host != nil && r.Pane != nil && r.Pane.ID == "%3" && !r.Wants {
+			marked = m.calls(r)
+		}
+	}
+	if !marked {
+		t.Fatal("karif's pane is marked in its own tree too")
+	}
+}

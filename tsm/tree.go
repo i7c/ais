@@ -29,6 +29,7 @@ type Row struct {
 	Host    *Host  // the remote it is on; nil for this host
 	Wants   bool   // in the "needs you" section
 	Aside   string // what tells this row from another with the same title
+	Rang    bool   // a bell that reached you through a connection came from here
 }
 
 // Key identifies a row across refreshes, so the cursor stays on the same
@@ -89,7 +90,8 @@ func BuildRows(snap *Snapshot, st *AisState, opt TreeOptions) []Row {
 // then this host's sessions and ended ones; then each remote's, under a
 // heading of its own.
 func BuildAll(snap *Snapshot, st *AisState, remotes []*Host, opt TreeOptions) []Row {
-	wants, tree, ended := sections(snap, st, nil, opt)
+	relayed, quiet := relayedBells(snap, remotes)
+	wants, tree, ended := sections(snap, st, nil, opt, "", quiet)
 	type part struct {
 		host        *Host
 		tree, ended []Row
@@ -100,7 +102,7 @@ func BuildAll(snap *Snapshot, st *AisState, remotes []*Host, opt TreeOptions) []
 			parts = append(parts, part{host: h})
 			continue
 		}
-		w, t, e := sections(h.Snap, h.State, h, opt)
+		w, t, e := sections(h.Snap, h.State, h, opt, relayed[h.Name], nil)
 		wants = append(wants, w...)
 		parts = append(parts, part{h, t, e})
 	}
@@ -130,8 +132,42 @@ func BuildAll(snap *Snapshot, st *AisState, remotes []*Host, opt TreeOptions) []
 	return rows
 }
 
+// relayedBells finds the bells that came over a connection. A remote's tmux
+// does not flag a bell in a window its client is showing, even when you are
+// looking somewhere else here; the bell then reaches this tmux through the
+// connection's pane instead. So a ringing window here that shows the way to a
+// remote means the pane that remote's linked client shows rang: relayed says
+// which, by host, and quiet the panes here whose bell it explains.
+func relayedBells(snap *Snapshot, remotes []*Host) (relayed map[string]string, quiet map[string]bool) {
+	rang := false
+	for _, s := range snap.Sessions {
+		for _, w := range s.Windows {
+			rang = rang || w.Bell
+		}
+	}
+	if !rang {
+		return nil, nil // the usual case: no need to look for connections
+	}
+	relayed, quiet = map[string]string{}, map[string]bool{}
+	for _, h := range remotes {
+		if h.Snap == nil || h.Remote.Conf.Name == "" {
+			continue
+		}
+		hosting := hostingPane(snap, h.Remote.Conf)
+		if hosting == nil || !hosting.Window.Bell || hosting.Window.ActivePane() != hosting {
+			continue
+		}
+		if id := h.Viewing(hosting); id != "" && h.Snap.Pane(id) != nil {
+			relayed[h.Name], quiet[hosting.ID] = id, true
+		}
+	}
+	return relayed, quiet
+}
+
 // sections builds one host's rows: its callers, its tree, its ended sessions.
-func sections(snap *Snapshot, st *AisState, host *Host, opt TreeOptions) (wants, tree, ended []Row) {
+// rang is a pane whose bell came over a connection; quiet are panes whose
+// own bell is one of those.
+func sections(snap *Snapshot, st *AisState, host *Host, opt TreeOptions, rang string, quiet map[string]bool) (wants, tree, ended []Row) {
 	byID := st.ByID()
 	byPane := st.ByPane()
 	window := 60.0
@@ -160,13 +196,20 @@ func sections(snap *Snapshot, st *AisState, host *Host, opt TreeOptions) (wants,
 					wants = append(wants, Row{Kind: RowPane, Session: s, Window: w, Pane: p, Ais: a, Depth: 1, Wants: true, Host: host})
 					called = true
 				}
-				panes = append(panes, Row{Kind: RowPane, Session: s, Window: w, Pane: p, Ais: a, Depth: 2, Host: host})
+				r := Row{Kind: RowPane, Session: s, Window: w, Pane: p, Ais: a, Depth: 2, Host: host, Rang: p.ID == rang}
+				if r.Rang && !called {
+					caller := r
+					caller.Depth, caller.Wants = 1, true
+					wants = append(wants, caller)
+					called = true
+				}
+				panes = append(panes, r)
 			}
 			// A bell, in a window you were not looking at, calls for you too
 			// (weechat rings it for a highlight or a private message). tmux
 			// forgets it once you look, and so does this.
 			if w.Bell && !called {
-				if p := w.ActivePane(); p != nil && p.ID != snap.Client.PaneID {
+				if p := w.ActivePane(); p != nil && p.ID != snap.Client.PaneID && !quiet[p.ID] {
 					for _, r := range panes {
 						if r.Pane == p {
 							r.Depth, r.Wants = 1, true
