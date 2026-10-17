@@ -28,7 +28,10 @@ type Payload struct {
 	Snap   *Snapshot `json:"snapshot"`
 	State  *AisState `json:"ais,omitempty"`
 	Places []Place   `json:"places,omitempty"`
-	At     time.Time `json:"at"` // when the remote end took it
+	// Clients is who is looking at that tmux, used last first; Snap.Client
+	// stays empty, since nobody there opened this.
+	Clients []Client  `json:"clients,omitempty"`
+	At      time.Time `json:"at"` // when the remote end took it
 }
 
 type Remote struct {

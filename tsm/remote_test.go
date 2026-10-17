@@ -3,11 +3,14 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 func TestSSHNeverPromptsAndSharesOneConnection(t *testing.T) {
@@ -195,5 +198,102 @@ func TestTheCacheLivesInDotCacheEverywhere(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", "/c")
 	if got := cacheDir(); got != "/c/tsm" {
 		t.Fatalf("got %s", got)
+	}
+}
+
+// opened is a popup opened from pane here, with karif reached through %4.
+func opened(t *testing.T, here string, karif *Payload) *model {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	snap := fixture()
+	snap.Client.PaneID = here
+	snap.Pane("%4").Remote = "karif"
+	m := newModel(Tmux{}, Ais{}, snap, Config{Remotes: []RemoteConf{{Name: "karif"}}})
+	if karif != nil {
+		m.Update(remoteMsg{"karif", karif, nil})
+	}
+	return m
+}
+
+func karifSeen(through string) *Payload {
+	return &Payload{Proto: proto, Snap: fixture(), Clients: []Client{
+		{Name: "/dev/pts/9", PaneID: "%2", Link: "elsewhere:%7"}, // used more recently, by someone else
+		{Name: "/dev/pts/3", PaneID: "%3", Link: hostname() + ":" + through},
+	}}
+}
+
+func cursorAt(m *model) (host, pane string) {
+	r, _ := m.selected()
+	if r.Host != nil {
+		host = r.Host.Name
+	}
+	if r.Pane != nil {
+		pane = r.Pane.ID
+	}
+	return host, pane
+}
+
+func TestThePopupOpensWhereYouAreLooking(t *testing.T) {
+	if h, p := cursorAt(opened(t, "%2", karifSeen("%4"))); h != "" || p != "%2" {
+		t.Fatalf("on %s|%s: a local pane is where you are, whatever a remote's clients show", h, p)
+	}
+	if h, p := cursorAt(opened(t, "%4", karifSeen("%4"))); h != "karif" || p != "%3" {
+		t.Fatalf("on %s|%s: on the way to karif, you are looking at what your karif client shows", h, p)
+	}
+	old := karifSeen("%4")
+	old.Clients = nil // a tsm there too old to say
+	if h, p := cursorAt(opened(t, "%4", old)); h != "" || p != "%4" {
+		t.Fatalf("on %s|%s: not knowing, the connection's own pane", h, p)
+	}
+}
+
+func TestSomeoneCallingDoesNotMoveYou(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	now := time.Now()
+	st := state(now, AisSession{ID: "aaa", Profile: "claude", Status: "active", Host: "h",
+		Notifications: []AisNotification{{At: now.Add(-time.Minute).Format(time.RFC3339), Message: "need you"}}})
+	m := newModel(Tmux{}, Ais{}, fixture(), Config{})
+	m.Update(stateMsg{st: st})
+	if !m.rows[1].Wants {
+		t.Fatal("the fixture should call for you")
+	}
+	if r, _ := m.selected(); r.Wants || r.Pane.ID != "%2" {
+		t.Fatalf("on %s: the caller is listed first, but you start where you are", r.Key())
+	}
+}
+
+func TestALateAnswerMovesOnlyAnUntouchedCursor(t *testing.T) {
+	m := opened(t, "%4", nil)
+	m.Update(remoteMsg{"karif", karifSeen("%4"), nil})
+	if h, p := cursorAt(m); h != "karif" || p != "%3" {
+		t.Fatalf("on %s|%s: an answer before you move takes you there", h, p)
+	}
+
+	m = opened(t, "%4", nil)
+	m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	_, before := cursorAt(m)
+	m.Update(remoteMsg{"karif", karifSeen("%4"), nil})
+	if h, p := cursorAt(m); h != "" || p != before {
+		t.Fatalf("on %s|%s: once you have moved, the cursor stays on %s", h, p, before)
+	}
+}
+
+func TestALinkIsReadFromTheClientsEnvironment(t *testing.T) {
+	if _, err := os.Stat("/proc/self/environ"); err != nil {
+		t.Skip("no /proc here")
+	}
+	cmd := exec.Command("sleep", "5")
+	cmd.Env = append(os.Environ(), linkEnv+"=mac:%3")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer cmd.Process.Kill()
+	// Start can return a moment before /proc shows the new environment.
+	got := ""
+	for i := 0; i < 100 && got != "mac:%3"; i++ {
+		got = linkOf(cmd.Process.Pid)
+		time.Sleep(time.Millisecond)
+	}
+	if got != "mac:%3" {
+		t.Fatalf("link = %q", got)
 	}
 }

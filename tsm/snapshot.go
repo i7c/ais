@@ -18,7 +18,8 @@ type Snapshot struct {
 type Client struct {
 	Name      string `json:"name"` // e.g. /dev/pts/7; empty outside tmux
 	SessionID string `json:"session_id"`
-	PaneID    string `json:"pane_id"` // the pane the client is looking at: "here"
+	PaneID    string `json:"pane_id"`        // the pane the client is looking at: "here"
+	Link      string `json:"link,omitempty"` // from "tsm attach", on a remote's clients
 }
 
 type Session struct {

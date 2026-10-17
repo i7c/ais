@@ -15,13 +15,22 @@ type Host struct {
 	Snap    *Snapshot
 	State   *AisState
 	Places  []Place
+	Clients []Client  // who looks at it there, used last first
 	At      time.Time // when the remote end took the picture
 	Err     error     // the last fetch failed, with this
 	Loading bool
 }
 
 func (h *Host) take(p *Payload) {
-	h.Snap, h.State, h.Places, h.At = p.Snap, p.State, p.Places, p.At
+	h.Snap, h.State, h.Places, h.Clients, h.At = p.Snap, p.State, p.Places, p.Clients, p.At
+}
+
+// Viewing is the pane there that the client linked to hosting is showing:
+// what you are looking at, when you are looking at hosting. A tsm too old to
+// say gives "".
+func (h *Host) Viewing(hosting *Pane) string {
+	c, _ := pickClient(h.Clients, link(hosting))
+	return c.PaneID
 }
 
 // Stale is true when the picture is old enough to say so.

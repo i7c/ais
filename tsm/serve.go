@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -33,7 +34,7 @@ func serveState(t Tmux, a Ais) int {
 	// Nobody is looking from here: whatever tmux called the current client
 	// was a guess, and "here" would mark the wrong pane.
 	snap.Client = Client{}
-	p := Payload{Proto: proto, Host: hostname(), Snap: snap, At: time.Now()}
+	p := Payload{Proto: proto, Host: hostname(), Snap: snap, Clients: viewers(t), At: time.Now()}
 	if a.Available() {
 		if st, err := a.State(); err == nil {
 			p.State = st
@@ -112,33 +113,51 @@ func listClients(t Tmux) []clientInfo {
 	return cs
 }
 
+// viewers is every client here, used last first, each with the link "tsm
+// attach" gave it: what the host above needs to tell which pane is the one
+// you are looking at through it.
+func viewers(t Tmux) []Client {
+	cs := listClients(t)
+	sort.SliceStable(cs, func(i, j int) bool { return cs[i].activity > cs[j].activity })
+	out := make([]Client, len(cs))
+	for i, c := range cs {
+		out[i] = c.Client
+		out[i].Link = linkOf(c.pid)
+	}
+	return out
+}
+
+// linkOf is the TSM_LINK in a client process's environment, if it can tell.
+func linkOf(pid int) string {
+	env, err := os.ReadFile(fmt.Sprintf("/proc/%d/environ", pid))
+	if err != nil {
+		return ""
+	}
+	for _, kv := range bytes.Split(env, []byte{0}) {
+		if v, ok := bytes.CutPrefix(kv, []byte(linkEnv+"=")); ok {
+			return string(v)
+		}
+	}
+	return ""
+}
+
 // linkedClient is the client a link names: the one whose process carries
 // TSM_LINK=link in its environment. Failing that, the only client there is,
 // or the one used last — a guess, but the guess a person would make.
 func linkedClient(t Tmux, link string) (Client, bool) {
-	cs := listClients(t)
+	return pickClient(viewers(t), link)
+}
+
+func pickClient(cs []Client, link string) (Client, bool) {
 	if len(cs) == 0 {
 		return Client{}, false
 	}
 	if link != "" {
-		want := []byte(linkEnv + "=" + link)
 		for _, c := range cs {
-			env, err := os.ReadFile(fmt.Sprintf("/proc/%d/environ", c.pid))
-			if err != nil {
-				continue
-			}
-			for _, kv := range bytes.Split(env, []byte{0}) {
-				if bytes.Equal(kv, want) {
-					return c.Client, true
-				}
+			if c.Link == link {
+				return c, true
 			}
 		}
 	}
-	best := cs[0]
-	for _, c := range cs[1:] {
-		if c.activity > best.activity {
-			best = c
-		}
-	}
-	return best.Client, true
+	return cs[0], true
 }

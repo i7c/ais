@@ -147,7 +147,8 @@ func pushState(t Tmux, a Ais, w *wireWriter, done <-chan struct{}) {
 		snap, err := t.Snapshot()
 		if err == nil {
 			snap.Client = Client{}
-			key, _ := json.Marshal(snap)
+			clients := viewers(t)
+			key, _ := json.Marshal([]any{snap, clients})
 			changed := !bytes.Equal(key, last)
 			if a.Available() && (changed || time.Since(lastAis) > 15*time.Second) {
 				if s, err := a.State(); err == nil {
@@ -157,7 +158,7 @@ func pushState(t Tmux, a Ais, w *wireWriter, done <-chan struct{}) {
 			}
 			if changed || time.Since(lastPush) >= pushAtLeast {
 				last, lastPush = key, time.Now()
-				p := &Payload{Proto: proto, Host: hostname(), Snap: snap, State: st, At: time.Now()}
+				p := &Payload{Proto: proto, Host: hostname(), Snap: snap, State: st, Clients: clients, At: time.Now()}
 				p.Places = Places(snap, st, nil, Roots())
 				if w.send(wire{Type: "state", Payload: p}) != nil {
 					return

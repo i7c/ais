@@ -40,8 +40,11 @@ is still a full tmux manager, just without the agent layer.
 ```
 
 - **needs you** — ais sessions whose last notification is recent and was not
-  already seen; the popup opens on the first of them, so `^b a ⏎` takes you
-  to whatever is waiting. Otherwise it opens on the pane you came from (`◆`).
+  already seen, listed first so they are a few keys up.
+
+The popup opens on the pane you came from (`◆`). When that pane is your way
+to a remote, it opens on the pane you are looking at over there instead (see
+below), so you navigate from where you are rather than from the top.
 - One row per window when the window is one pane; a window of several lists
   them under it.
 - **resumable** — ais sessions that ended and can be restarted here, the
@@ -166,6 +169,12 @@ and tags the tmux client it starts there, so a jump to a karif pane switches
 this pane's view there and moves your client here to this pane. A connection
 made by hand is found by its `ssh karif` / `mosh` command line; on the far end
 tsm then moves the client used last.
+
+The same tag tells tsm what you are looking at on karif: open the popup from
+the pane connected to it and the cursor starts on the karif pane that client
+shows. That comes from the cache (kept current by `tsm relay` when it runs),
+and if the answer only arrives after the popup opens, the cursor moves there
+unless you have already pressed a key.
 
 How it stays fast at ~300ms round trips:
 

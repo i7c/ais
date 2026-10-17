@@ -79,7 +79,7 @@ type model struct {
 	statusErr bool
 	width     int
 	height    int
-	placed    bool // the cursor has found its starting row
+	touched   bool // a key or click came in: the cursor is yours from now on
 }
 
 type (
@@ -262,7 +262,9 @@ func (m *model) selected() (Row, bool) {
 }
 
 // rebuild lays the rows out again and puts the cursor back on what it was on.
-// The first time, it starts on whatever needs you, else the pane you came from.
+// Until you touch it, it sits where you are looking: the pane you came from,
+// or, when that pane is the way to a remote, the pane you see there — which
+// can arrive after the popup opens.
 func (m *model) rebuild() {
 	shown, remotes := m.snap, m.remotes
 	if m.moving {
@@ -284,9 +286,8 @@ func (m *model) rebuild() {
 	m.rows = BuildAll(shown, m.st, remotes, TreeOptions{
 		Filter: m.filter.Value(), Collapsed: m.collapsed, Now: time.Now(), Resumable: resumableShow,
 	})
-	if !m.placed {
+	if !m.touched {
 		m.cursor = m.startRow()
-		m.placed = true
 	} else if i := m.findKey(m.key); i >= 0 {
 		m.cursor = i
 	}
@@ -294,17 +295,29 @@ func (m *model) rebuild() {
 }
 
 func (m *model) startRow() int {
-	for i, r := range m.rows {
-		if r.Wants {
-			return i
+	here := m.snap.Client.PaneID
+	for _, h := range m.remotes {
+		if hosting := hostingPane(m.snap, h.Remote.Conf); hosting != nil && hosting.ID == here {
+			if i := m.paneRow(h, h.Viewing(hosting)); i >= 0 {
+				return i
+			}
 		}
 	}
-	for i, r := range m.rows {
-		if r.Pane != nil && !r.Wants && r.Pane.ID == m.snap.Client.PaneID {
-			return i
-		}
+	if i := m.paneRow(nil, here); i >= 0 {
+		return i
 	}
 	return 0
+}
+
+// paneRow is where pane id of host h sits in the tree (not among the callers
+// above it), or -1.
+func (m *model) paneRow(h *Host, id string) int {
+	for i, r := range m.rows {
+		if id != "" && r.Pane != nil && !r.Wants && r.Host == h && r.Pane.ID == id {
+			return i
+		}
+	}
+	return -1
 }
 
 // firstMatch is where a filter puts the cursor: on the first thing it
@@ -490,9 +503,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(m.loadSnap(), m.fetch(m.host(msg.host)))
 
 	case tea.MouseMsg:
+		m.touched = m.touched || msg.Action != tea.MouseActionMotion
 		return m, m.mouse(msg)
 
 	case tea.KeyMsg:
+		m.touched = true
 		// Keys typed faster than tsm reads them arrive as one run of runes
 		// ("jj"); outside a text field each of them is a command of its own.
 		if msg.Type == tea.KeyRunes && len(msg.Runes) > 1 && !msg.Paste &&
