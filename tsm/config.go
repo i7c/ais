@@ -30,15 +30,21 @@ type RemoteConf struct {
 	Command []string `toml:"command"` // instead of ssh: run remote commands with this prefix (tests, containers)
 }
 
+// configPath is $TSM_CONFIG, else $XDG_CONFIG_HOME/tsm/config.toml, else
+// ~/.config/tsm/config.toml — on every OS. Go's own idea of a config dir is
+// ~/Library/Application Support on a Mac, which is not where anybody keeps
+// the dotfiles of a terminal tool.
 func configPath() string {
 	if p := os.Getenv("TSM_CONFIG"); p != "" {
 		return p
 	}
-	dir, err := os.UserConfigDir()
-	if err != nil {
+	if dir := os.Getenv("XDG_CONFIG_HOME"); dir != "" {
+		return filepath.Join(dir, "tsm", "config.toml")
+	}
+	if home == "" {
 		return ""
 	}
-	return filepath.Join(dir, "tsm", "config.toml")
+	return filepath.Join(home, ".config", "tsm", "config.toml")
 }
 
 func LoadConfig() (Config, error) {

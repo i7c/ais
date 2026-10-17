@@ -167,3 +167,19 @@ func TestTheControlSocketFitsInAUnixSocketPath(t *testing.T) {
 		t.Fatalf("%s would be too long once %%C is filled in", p)
 	}
 }
+
+func TestTheConfigLivesInDotConfigEverywhere(t *testing.T) {
+	t.Setenv("TSM_CONFIG", "")
+	t.Setenv("XDG_CONFIG_HOME", "")
+	if got := configPath(); got != filepath.Join(home, ".config", "tsm", "config.toml") {
+		t.Fatalf("got %s", got)
+	}
+	t.Setenv("XDG_CONFIG_HOME", "/x")
+	if got := configPath(); got != "/x/tsm/config.toml" {
+		t.Fatalf("got %s", got)
+	}
+	t.Setenv("TSM_CONFIG", "/y.toml")
+	if got := configPath(); got != "/y.toml" {
+		t.Fatalf("got %s", got)
+	}
+}
