@@ -138,6 +138,11 @@ flags = []
 # sound = "Glass"     # macOS notification sound; "" for silent
 # window = 60         # minutes a notification stays "recent" in ls/status/select
 # when_visible = "skip"  # or "send": notify even while you are looking at the pane
+# sink = ["tsm", "notify", "--stdin"]
+                      # offered every notification first, as JSON on stdin; it
+                      # answers {"result": "shown"|"suppressed"} or declines by
+                      # exiting non-zero. On a server, "tsm notify" passes it
+                      # to the laptop connected through "tsm relay".
 '''
 
 
@@ -377,7 +382,15 @@ def notify_settings() -> dict:
         die("config: notify.window must be a non-negative number of minutes")
     if when_visible not in ("skip", "send"):
         die('config: notify.when_visible must be "skip" or "send"')
-    return {"sound": sound, "window": float(window), "when_visible": when_visible}
+    sink = table.get("sink") or []
+    if isinstance(sink, str):
+        sink = shlex.split(sink)
+    if not isinstance(sink, list) or not all(isinstance(s, str) for s in sink):
+        die("config: notify.sink must be a command, as a list of strings")
+    return {
+        "sound": sound, "window": float(window), "when_visible": when_visible,
+        "sink": [os.path.expanduser(s) for s in sink],
+    }
 
 
 # ---------------------------------------------------------------- state
@@ -847,11 +860,40 @@ def record_notification(sid: str, entry: dict) -> bool:
     return mutate_sessions(apply)
 
 
+def offer_to_sink(sink: list[str], payload: dict) -> str | None:
+    """Hand a notification to [notify] sink; what became of it, or None.
+
+    The sink reads the notification as JSON on stdin and answers on stdout
+    with {"result": "shown"} or {"result": "suppressed"}, exiting 0; anything
+    else — a non-zero exit, no answer, no such command — means it declined,
+    and ais delivers the notification itself. That is how a notification
+    raised on a server reaches the laptop looking at it ("tsm notify"),
+    when one is, without ais knowing anything about either.
+    """
+    try:
+        res = subprocess.run(
+            sink, input=json.dumps(payload), capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if res.returncode != 0:
+        return None
+    try:
+        result = (json.loads(res.stdout or "{}") or {}).get("result")
+    except json.JSONDecodeError:
+        return None
+    return result if result in ("shown", "suppressed") else None
+
+
 def cmd_notify(args):
     """Raise a desktop notification for this session and remember that it happened.
 
     Skipped — recorded, but not shown — while the session's own pane is the one
     on screen, since a banner about a pane you are reading is just noise.
+
+    With [notify] sink configured, the sink is asked first and decides; it is
+    told whether the pane is on screen here, since "here" may not be where
+    you are looking.
     """
     message = " ".join(args.message).strip()
     if not message:
@@ -871,18 +913,33 @@ def cmd_notify(args):
     harness = (session or {}).get("harness") or os.environ.get("AIS_HARNESS") or PROG
     title = args.title or (f"{harness} — {elide(tag, 40)}" if tag else harness)
     sound = "" if args.no_sound else settings["sound"]
+    nid, at = notification_id(), now_iso()
 
-    delivered, error = (False, None)
-    if not suppress:
-        delivered, error = deliver_desktop(title, message, sound)
+    via = None
+    if settings["sink"]:
+        result = offer_to_sink(settings["sink"], {
+            "id": nid, "at": at, "title": title, "message": message, "tag": tag,
+            "session": sid or "", "harness": harness, "pane": pane_id or "",
+            "visible": visible, "force": bool(args.force), "host": socket.gethostname(),
+        })
+        if result:
+            via = "sink"
+            delivered, suppress, error = result == "shown", result == "suppressed", None
+
+    if via is None:
+        delivered, error = (False, None)
+        if not suppress:
+            delivered, error = deliver_desktop(title, message, sound)
 
     entry = {
-        "id": notification_id(),
-        "at": now_iso(),
+        "id": nid,
+        "at": at,
         "message": message,
         "delivered": delivered,
         "suppressed": suppress,
     }
+    if via:
+        entry["via"] = via
     if error:
         entry["error"] = error
 

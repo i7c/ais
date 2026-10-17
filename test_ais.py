@@ -1110,6 +1110,32 @@ class Api(unittest.TestCase):
         self.assertEqual(len(first), len(second))
 
 
+class Sink(unittest.TestCase):
+    """A sink takes a notification or declines it; ais never loses one."""
+
+    def sink(self, script):
+        tmp = tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False)
+        tmp.write("#!/bin/sh\n" + script + "\n")
+        tmp.close()
+        os.chmod(tmp.name, 0o755)
+        self.addCleanup(os.unlink, tmp.name)
+        return [tmp.name]
+
+    def test_its_answer_is_what_became_of_it(self):
+        self.assertEqual(ais.offer_to_sink(self.sink('cat >/dev/null; echo \'{"result":"shown"}\''), {}), "shown")
+        self.assertEqual(ais.offer_to_sink(self.sink('cat >/dev/null; echo \'{"result":"suppressed"}\''), {}), "suppressed")
+
+    def test_it_reads_the_notification(self):
+        out = Path(tempfile.mkdtemp()) / "got"
+        ais.offer_to_sink(self.sink(f'cat > {out}; echo \'{{"result":"shown"}}\''), {"message": "hi"})
+        self.assertEqual(json.loads(out.read_text())["message"], "hi")
+
+    def test_anything_else_is_declining(self):
+        for script in ("exit 1", "echo '{\"result\":\"maybe\"}'", "echo nonsense"):
+            self.assertIsNone(ais.offer_to_sink(self.sink(script), {}), script)
+        self.assertIsNone(ais.offer_to_sink(["/no/such/sink"], {}))
+
+
 class NameOf(unittest.TestCase):
     def test_previews_the_name_without_a_session(self):
         out = io.StringIO()

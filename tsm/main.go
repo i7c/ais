@@ -17,6 +17,9 @@ const usage = `usage: tsm                open the manager (made for a tmux popup
        tsm attach NAME    connect this pane to remote NAME's tmux, and
                           mark it as the way there
        tsm snapshot       print every session, window and pane as JSON
+       tsm relay          carry notifications (and snapshots) up from the
+                          remotes to here; "tsm relay status" says how it is
+       tsm notify --stdin ais's [notify] sink: pass a notification up
 
   bind-key a display-popup -E -w 90% -h 80% -T " tsm " "tsm"
 
@@ -52,6 +55,27 @@ func run(args []string) int {
 				return 2
 			}
 			return serveCapture(t, args[1])
+		case "notify":
+			if len(args) != 2 || args[1] != "--stdin" {
+				fmt.Fprintln(os.Stderr, "usage: tsm notify --stdin   (a notification as JSON, from ais)")
+				return 2
+			}
+			return cmdNotify(os.Stdin)
+		case "relay":
+			switch {
+			case len(args) == 2 && args[1] == "--serve":
+				return serveRelay(t, NewAis(execRunner{}), os.Stdin, os.Stdout)
+			case len(args) == 2 && args[1] == "status":
+				return relayStatusCmd()
+			case len(args) == 1:
+				if confErr != nil {
+					fmt.Fprintln(os.Stderr, "tsm:", confErr)
+					return 1
+				}
+				return runRelay(t, conf)
+			}
+			fmt.Fprint(os.Stderr, usage)
+			return 2
 		case "attach":
 			if confErr != nil {
 				fmt.Fprintln(os.Stderr, "tsm:", confErr)

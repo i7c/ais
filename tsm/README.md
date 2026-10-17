@@ -193,6 +193,64 @@ tmux older than 3.8 replaces control and non-ASCII characters in its
 output with `_` unless it runs in a UTF-8 locale, which commands over ssh
 usually lack; tsm gives its tmux calls `LC_CTYPE=C.UTF-8` when needed.
 
+## Notifications from anywhere: `tsm relay`
+
+`ais notify` on a server you reach through tmux reaches the screen you are
+looking at, however many hops away: each host runs a `tsm relay`, connected
+to the hosts below it, and a notification climbs the chain of connections
+until it reaches one with a screen.
+
+```
+karif:    ais notify → tsm notify ─┐
+                                   └ relay --serve ══ssh══ agalloch: tsm relay ─┐
+agalloch: ais notify → tsm notify ──────────────────────────────────────────────┴ relay --serve ══ssh══ Mac: tsm relay → banner
+```
+
+- **On every host with agents:** tell ais to offer its notifications to tsm
+  first, in `~/.ais/config.toml`:
+  ```toml
+  [notify]
+  sink = ["~/.local/bin/tsm", "notify", "--stdin"]
+  ```
+  With nobody connected from above, `tsm notify` declines and ais does what
+  it always did, recording the notification as undelivered.
+- **On every host that reaches others** (`[[remote]]` in its tsm config), run
+  the relay. From tmux.conf it lives and dies with the server:
+  ```
+  run-shell -b 'tsm relay'
+  ```
+  On a Mac without tmux, run it as a LaunchAgent
+  (`~/Library/LaunchAgents/tsm.relay.plist`, then `launchctl load` it):
+  ```xml
+  <plist version="1.0"><dict>
+    <key>Label</key><string>tsm.relay</string>
+    <key>ProgramArguments</key><array><string>/usr/local/bin/tsm</string><string>relay</string></array>
+    <key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
+  </dict></plist>
+  ```
+- `tsm relay status` says what is connected, below and above.
+
+What happens to a notification:
+
+- Each relay offers it to the relay above, if one is connected to its host;
+  the top one shows it (`osascript` on a Mac, `notify-send` on a Linux
+  desktop, or `$TSM_NOTIFY_CMD title message` for anything else).
+- It is **suppressed** only if you are looking at it all the way up: its
+  pane is on screen where it was raised, every host in between is showing
+  the pane that holds the connection, and on a Mac the terminal is in front.
+  The record on the server says so, which keeps "needs you" honest.
+- If nobody is connected above a host, the notification is held there (50, a
+  day at most) and replayed, with the server's own undelivered ones, when a
+  relay connects — folded into one banner if there are several.
+- The relay also pushes each remote's tmux picture up whenever it changes (at
+  least every 5s), into the cache the popup opens on: with a relay running,
+  a remote is `● live` the moment the popup appears.
+
+Relay connections use ssh (never mosh, which has no side channel), so they
+work alongside an interactive mosh session and reconnect after sleep or a
+dropped network. Banners on a Mac cannot be clicked through to the pane:
+`osascript` notifications do not report clicks.
+
 A new shell beside an ais pane starts in the session's directory — its
 worktree — with its profile's env and `$AIS_WORKTREE`/`$AIS_WORKTREE_BASE`
 (from `ais env`), but not `$AIS_SESSION`: the shell is not the agent.

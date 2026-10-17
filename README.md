@@ -125,6 +125,15 @@ gets one without `-w`, start one anywhere else and it just runs where you are.
 Only a `-w` you typed yourself insists on a repo and fails without one; pass
 `--no-worktree` to opt a single run out.
 
+## Notifications from servers
+
+`[notify] sink` hands every notification to a command first, as JSON on
+stdin; it answers `{"result": "shown"}` or `{"result": "suppressed"}`, or
+declines by exiting non-zero, and ais then delivers it itself. With
+`sink = ["~/.local/bin/tsm", "notify", "--stdin"]`, notifications raised on a
+server reach the laptop looking at it through `tsm relay` — see
+[tsm](tsm/README.md#notifications-from-anywhere-tsm-relay).
+
 ## Files
 
 - `~/.ais/config.toml` — per-harness flags/env, `[worktree]`, `[tmux]`, `[notify]`
