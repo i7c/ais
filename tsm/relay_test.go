@@ -4,12 +4,16 @@ import (
 	"bufio"
 	"encoding/json"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+// Serving relays check their socket often here, or the tests would wait.
+func init() { reclaimEvery = 20 * time.Millisecond }
 
 // a fake ais whose state holds the given notifications on one session.
 func aisWith(notes string) Ais {
@@ -173,5 +177,97 @@ func TestWithNobodyAboveTheSinkDeclines(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", shortTemp(t))
 	if code := cmdNotify(strings.NewReader(`{"id":"1","message":"x"}`)); code != 1 {
 		t.Fatalf("exit %d: ais must deliver it itself", code)
+	}
+}
+
+// Someone takes the socket over and dies without tidying up: the
+// connection still alive takes it back, so notes reach it again.
+func TestAnAbandonedSocketIsTakenBack(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", shortTemp(t))
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	tm := Tmux{r: &fakeRunner{reply: func([]string) string { return "" }}}
+
+	upR, upW := io.Pipe()
+	downR, downW := io.Pipe()
+	defer downW.Close()
+	go serveRelay(tm, aisWith(""), downR, upW)
+	notes := make(chan *Note, 4)
+	go func() {
+		dec := json.NewDecoder(bufio.NewReader(upR))
+		for {
+			var m wire
+			if dec.Decode(&m) != nil {
+				return
+			}
+			if m.Type == "notify" {
+				notes <- m.Note
+			}
+		}
+	}()
+
+	sock := relaySocket()
+	for i := 0; !listening(sock); i++ {
+		if i > 200 {
+			t.Fatal("never listened")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	// The usurper: a socket file of its own, left behind with nobody on it.
+	os.Remove(sock)
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln.(*net.UnixListener).SetUnlinkOnClose(false)
+	ln.Close()
+	if listening(sock) {
+		t.Fatal("the stale socket should refuse")
+	}
+
+	for i := 0; !listening(sock); i++ {
+		if i > 200 {
+			t.Fatal("the socket was never taken back")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	go offerUpstream(Note{ID: "1", Message: "back"}, time.Second)
+	select {
+	case n := <-notes:
+		if n.Message != "back" {
+			t.Fatalf("note %+v", n)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the note did not come up")
+	}
+}
+
+// A newer connection that is alive keeps the socket.
+func TestALiveTakeoverIsLeftAlone(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", shortTemp(t))
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	tm := Tmux{r: &fakeRunner{reply: func([]string) string { return "" }}}
+
+	upR, upW := io.Pipe()
+	downR, downW := io.Pipe()
+	defer downW.Close()
+	go io.Copy(io.Discard, upR)
+	go serveRelay(tm, aisWith(""), downR, upW)
+	sock := relaySocket()
+	for i := 0; !listening(sock); i++ {
+		if i > 200 {
+			t.Fatal("never listened")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	os.Remove(sock)
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	newer, _ := os.Stat(sock)
+	time.Sleep(10 * reclaimEvery)
+	if now, err := os.Stat(sock); err != nil || !os.SameFile(now, newer) {
+		t.Fatal("the newer connection lost its socket")
 	}
 }

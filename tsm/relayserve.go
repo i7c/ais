@@ -51,8 +51,13 @@ const (
 	ackWait     = 9 * time.Second
 )
 
+// reclaimEvery is how often a serving relay checks that its socket is still
+// there for it.
+var reclaimEvery = 5 * time.Second
+
 func serveRelay(t Tmux, a Ais, in io.Reader, out io.Writer) int {
 	w := &wireWriter{enc: json.NewEncoder(out)}
+	every := reclaimEvery
 	sock := relaySocket()
 	os.MkdirAll(filepath.Dir(sock), 0o700)
 	// Another laptop's relay may hold the socket; the newest connection is
@@ -63,8 +68,14 @@ func serveRelay(t Tmux, a Ais, in io.Reader, out io.Writer) int {
 		w.send(wire{Type: "error", Result: err.Error()})
 		return 1
 	}
+	// Go would unlink the path on Close, whoever's socket is there by then;
+	// it is removed below only while it is still this one.
+	ln.(*net.UnixListener).SetUnlinkOnClose(false)
 	mine, _ := os.Stat(sock)
+	var held sync.Mutex // ln and mine, which reclaiming replaces
 	defer func() {
+		held.Lock()
+		defer held.Unlock()
 		ln.Close()
 		if now, err := os.Stat(sock); err == nil && mine != nil && os.SameFile(now, mine) {
 			os.Remove(sock)
@@ -97,7 +108,7 @@ func serveRelay(t Tmux, a Ais, in io.Reader, out io.Writer) int {
 		}
 	}()
 
-	go func() {
+	accept := func(ln net.Listener) {
 		for {
 			conn, err := ln.Accept()
 			if err != nil {
@@ -128,11 +139,57 @@ func serveRelay(t Tmux, a Ais, in io.Reader, out io.Writer) int {
 				json.NewEncoder(conn).Encode(map[string]string{"result": result})
 			}(conn)
 		}
+	}
+	go accept(ln)
+
+	// The socket is the only way ais here reaches this connection. Should
+	// someone take the path over and then go without tidying up, nothing
+	// would listen there and every notification would be refused, so take
+	// it back — unless a newer connection is still listening on it.
+	go func() {
+		tick := time.NewTicker(every)
+		defer tick.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-tick.C:
+			}
+			held.Lock()
+			select {
+			case <-done: // on its way out: the socket goes with it
+				held.Unlock()
+				return
+			default:
+			}
+			now, err := os.Stat(sock)
+			if (err != nil || !os.SameFile(now, mine)) && !listening(sock) {
+				os.Remove(sock)
+				if nl, err := net.Listen("unix", sock); err == nil {
+					nl.(*net.UnixListener).SetUnlinkOnClose(false)
+					ln.Close()
+					ln = nl
+					mine, _ = os.Stat(sock)
+					go accept(nl)
+				}
+			}
+			held.Unlock()
+		}
 	}()
 
 	go pushState(t, a, w, done)
 	<-done
 	return 0
+}
+
+// listening is whether something answers on the unix socket at path.
+func listening(path string) bool {
+	conn, err := net.DialTimeout("unix", path, time.Second)
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
 }
 
 // pushState sends the host's picture up whenever it changes, and at least

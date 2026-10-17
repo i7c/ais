@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -155,12 +156,15 @@ func TestAisStateVersionIsChecked(t *testing.T) {
 }
 
 type fakeRunner struct {
+	mu    sync.Mutex // the relay calls it from more than one goroutine
 	calls [][]string
 	reply func(args []string) string
 }
 
 func (f *fakeRunner) Run(name string, args ...string) (string, error) {
+	f.mu.Lock()
 	f.calls = append(f.calls, append([]string{name}, args...))
+	f.mu.Unlock()
 	if f.reply != nil {
 		return f.reply(args), nil
 	}
