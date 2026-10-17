@@ -40,7 +40,10 @@ is still a full tmux manager, just without the agent layer.
 ```
 
 - **needs you** — ais sessions whose last notification is recent and was not
-  already seen, listed first so they are a few keys up.
+  already seen, listed first so they are a few keys up. A window that rang
+  the terminal bell while you were not looking joins them (weechat's default
+  `beep` trigger rings it for highlights and private messages), until you
+  visit it and tmux clears the flag. Remote ones too.
 
 The popup opens on the pane you came from (`◆`). When that pane is your way
 to a remote, it opens on the pane you are looking at over there instead (see

@@ -145,6 +145,7 @@ func sections(snap *Snapshot, st *AisState, host *Host, opt TreeOptions) (wants,
 		var body []Row
 		for _, w := range s.Windows {
 			var panes []Row
+			called := false // something in the window is already among the callers
 			for _, p := range w.Panes {
 				a := byID[p.AisID]
 				if a == nil && p.AisID == "" {
@@ -157,8 +158,22 @@ func sections(snap *Snapshot, st *AisState, host *Host, opt TreeOptions) (wants,
 				}
 				if a != nil && a.WantsYou(window, opt.Now) && p.ID != snap.Client.PaneID {
 					wants = append(wants, Row{Kind: RowPane, Session: s, Window: w, Pane: p, Ais: a, Depth: 1, Wants: true, Host: host})
+					called = true
 				}
 				panes = append(panes, Row{Kind: RowPane, Session: s, Window: w, Pane: p, Ais: a, Depth: 2, Host: host})
+			}
+			// A bell, in a window you were not looking at, calls for you too
+			// (weechat rings it for a highlight or a private message). tmux
+			// forgets it once you look, and so does this.
+			if w.Bell && !called {
+				if p := w.ActivePane(); p != nil && p.ID != snap.Client.PaneID {
+					for _, r := range panes {
+						if r.Pane == p {
+							r.Depth, r.Wants = 1, true
+							wants = append(wants, r)
+						}
+					}
+				}
 			}
 			switch {
 			case len(panes) == 0:

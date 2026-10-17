@@ -36,7 +36,8 @@ type Window struct {
 	Name     string   `json:"name"`
 	Active   bool     `json:"active"`
 	Zoomed   bool     `json:"zoomed"`
-	Activity int64    `json:"activity"` // unix seconds of the last output in the window
+	Activity int64    `json:"activity"`       // unix seconds of the last output in the window
+	Bell     bool     `json:"bell,omitempty"` // rang while nobody was looking at it
 	Panes    []*Pane  `json:"panes"`
 	Session  *Session `json:"-"`
 	Moved    string   `json:"-"` // staged: where it came from
@@ -100,6 +101,7 @@ var paneFields = []string{
 	"pane_current_path", "pane_pid", "pane_title", "pane_dead",
 	"pane_width", "pane_height",
 	"@ais_id", "@ais_profile", "@ais_desc", "@cwd", "@tsm_remote",
+	"window_bell_flag",
 }
 
 var clientFields = []string{"client_name", "session_id", "pane_id", "base-index"}
@@ -159,7 +161,7 @@ func ParseSnapshot(out string) *Snapshot {
 			activity, _ := strconv.ParseInt(f[8], 10, 64)
 			w = &Window{
 				ID: f[3], Index: atoi(f[4]), Name: f[5], Active: f[6] == "1",
-				Zoomed: f[7] == "1", Activity: activity, Session: s,
+				Zoomed: f[7] == "1", Activity: activity, Bell: f[24] == "1", Session: s,
 			}
 			windows[f[3]] = w
 			s.Windows = append(s.Windows, w)

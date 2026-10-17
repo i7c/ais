@@ -12,11 +12,11 @@ import (
 
 // line builds one list-panes line in tmux's field order.
 func line(sess, sname, win string, widx int, wname, pane string, pidx int, cmd, path string, marks ...string) string {
-	m := append(marks, "", "", "", "", "")[:5]
+	m := append(marks, "", "", "", "", "", "0")[:6]
 	f := []string{
 		sess, sname, "1", win, fmt.Sprint(widx), wname, "1", "0", "1700000000",
 		pane, fmt.Sprint(pidx), "1", cmd, path, "42", "title", "0", "80", "24",
-		m[0], m[1], m[2], m[3], m[4],
+		m[0], m[1], m[2], m[3], m[4], m[5],
 	}
 	return strings.Join(f, sep)
 }
@@ -280,5 +280,32 @@ func TestTmuxIsToldItSpeaksUTF8(t *testing.T) {
 	}
 	if got := last(tmuxEnv([]string{"LANG=en_US.UTF-8", "LC_ALL=C"})); got != "LC_ALL=C.UTF-8" {
 		t.Fatalf("LC_ALL=C would win over LC_CTYPE: %s", got)
+	}
+}
+
+func TestABellCallsForYou(t *testing.T) {
+	out := strings.Join([]string{
+		line("$1", "soi", "@1", 1, "backend", "%1", 1, "python3", "/home/x/git/repo", "aaa", "claude", "fix it", "/wt/fix/repo", "", "1"),
+		line("$1", "soi", "@2", 2, "dev", "%2", 1, "zsh", "/home/x/dev", "", "", "", "", "", "1"),
+		line("$2", "irc", "@3", 1, "weechat", "%4", 1, "weechat", "/home/x", "", "", "", "", "", "1"),
+		clientMarker + strings.Join([]string{"/dev/pts/1", "$1", "%2", "1"}, sep),
+	}, "\n")
+	snap := ParseSnapshot(out)
+	if !snap.Pane("%4").Window.Bell {
+		t.Fatal("tmux's bell flag is read")
+	}
+	now := time.Now()
+	st := state(now, AisSession{ID: "aaa", Profile: "claude", Status: "active", Host: "h",
+		Notifications: []AisNotification{{At: now.Add(-time.Minute).Format(time.RFC3339), Message: "need you"}}})
+	var callers []string
+	for _, r := range BuildRows(snap, st, TreeOptions{Now: now}) {
+		if r.Wants {
+			callers = append(callers, r.Pane.ID)
+		}
+	}
+	// %1 once though it rang too; %2 rang where you are looking, which tmux
+	// would not even flag.
+	if !reflect.DeepEqual(callers, []string{"%1", "%4"}) {
+		t.Fatalf("callers = %v", callers)
 	}
 }

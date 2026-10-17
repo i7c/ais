@@ -20,6 +20,7 @@ var (
 	cSelBg  = lipgloss.AdaptiveColor{Dark: "#323232", Light: "#e8e8e8"}
 	cRule   = lipgloss.AdaptiveColor{Dark: "#3a3a3a", Light: "#d0d0d0"}
 	cOK     = lipgloss.AdaptiveColor{Dark: "#87d787", Light: "#2e7d32"}
+	cRemote = lipgloss.AdaptiveColor{Dark: "#c5a3ff", Light: "#6a3fb5"} // a remote's session names
 
 	profileColors = map[string]lipgloss.AdaptiveColor{
 		"claude": {Dark: "#e8956b", Light: "#b5532f"},
@@ -296,7 +297,7 @@ func (m *model) renderRow(r Row, selected bool, w int) string {
 	mark := " "
 	switch {
 	case r.Kind == RowHeader:
-	case r.Wants || (r.Ais != nil && r.Pane != nil && m.wants(r)):
+	case m.calls(r):
 		mark = st(cWant).Render("●")
 	case r.Host == nil && r.Pane != nil && r.Pane.ID == m.snap.Client.PaneID:
 		mark = st(cAccent).Render("◆")
@@ -318,7 +319,7 @@ func (m *model) renderRow(r Row, selected bool, w int) string {
 	}
 	if selected {
 		mark = st(cAccent).Render("▌")
-		if r.Wants || (r.Ais != nil && r.Pane != nil && m.wants(r)) {
+		if m.calls(r) {
 			mark = st(cWant).Render("▌")
 		}
 	}
@@ -346,6 +347,9 @@ func (m *model) renderRow(r Row, selected bool, w int) string {
 			arrow = "▸"
 		}
 		name := st(cText).Bold(true)
+		if r.Host != nil {
+			name = st(cRemote).Bold(true)
+		}
 		if r.Host == nil && r.Session.ID == m.snap.Client.SessionID {
 			name = st(cAccent).Bold(true)
 		}
@@ -444,6 +448,18 @@ func containsPane(w *Window, id string) bool {
 		}
 	}
 	return false
+}
+
+// calls is whether a row gets the needs-you mark: it is among the callers,
+// its agent wants you, or its window rang the bell.
+func (m *model) calls(r Row) bool {
+	switch {
+	case r.Wants:
+		return true
+	case r.Ais != nil && r.Pane != nil && m.wants(r):
+		return true
+	}
+	return r.Kind == RowWindow && r.Window.Bell
 }
 
 func (m *model) wants(r Row) bool {
@@ -563,6 +579,9 @@ func (m *model) preview(w, h int) []string {
 		lines = append(lines, label("at")+text(p.Location())+fg(cDim).Render(fmt.Sprintf("  %s  %dx%d", p.ID, p.Width, p.Height)))
 		if p.Window.Activity > 0 {
 			field("active", ageStr(now.Sub(time.Unix(p.Window.Activity, 0)))+" ago")
+		}
+		if p.Window.Bell {
+			lines = append(lines, fg(cWant).Render("● ")+fg(cMuted).Render("rang the bell"))
 		}
 		if a != nil {
 			if d, ok := since(a.StartedAt, now); ok {
