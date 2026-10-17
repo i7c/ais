@@ -183,3 +183,17 @@ func TestTheConfigLivesInDotConfigEverywhere(t *testing.T) {
 		t.Fatalf("got %s", got)
 	}
 }
+
+func TestTheCacheLivesInDotCacheEverywhere(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", "")
+	if got := cacheDir(); got != filepath.Join(home, ".cache", "tsm") {
+		t.Fatalf("got %s", got)
+	}
+	if got := lastCreatePath(); got != filepath.Join(home, ".cache", "tsm", "last-create.json") {
+		t.Fatalf("got %s", got)
+	}
+	t.Setenv("XDG_CACHE_HOME", "/c")
+	if got := cacheDir(); got != "/c/tsm" {
+		t.Fatalf("got %s", got)
+	}
+}

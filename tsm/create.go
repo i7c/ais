@@ -324,13 +324,7 @@ type lastCreate struct {
 	Worktree *bool     `json:"worktree,omitempty"`
 }
 
-func lastCreatePath() string {
-	dir, err := os.UserCacheDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(dir, "tsm", "last-create.json")
-}
+func lastCreatePath() string { return filepath.Join(cacheDir(), "last-create.json") }
 
 func loadLastCreate() lastCreate {
 	last := lastCreate{Profile: "\x00", Place: NewWindow} // "\x00": never chosen

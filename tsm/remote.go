@@ -35,12 +35,16 @@ type Remote struct {
 	Conf RemoteConf
 }
 
+// cacheDir is $XDG_CACHE_HOME/tsm, else ~/.cache/tsm — on every OS, like
+// the config (Go's own answer on a Mac would be ~/Library/Caches).
 func cacheDir() string {
-	dir, err := os.UserCacheDir()
-	if err != nil {
+	if dir := os.Getenv("XDG_CACHE_HOME"); dir != "" {
+		return filepath.Join(dir, "tsm")
+	}
+	if home == "" {
 		return filepath.Join(os.TempDir(), "tsm")
 	}
-	return filepath.Join(dir, "tsm")
+	return filepath.Join(home, ".cache", "tsm")
 }
 
 // controlPath is where the shared connection's socket lives. ssh's %C is 40
