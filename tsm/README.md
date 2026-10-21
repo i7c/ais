@@ -259,7 +259,14 @@ What happens to a notification:
   relay connects — folded into one banner if there are several.
 - The relay also pushes each remote's tmux picture up whenever it changes (at
   least every 5s), into the cache the popup opens on: with a relay running,
-  a remote is `● live` the moment the popup appears.
+  a remote is `● live` the moment the popup appears. "Whenever it changes" is
+  tmux's word for it, not a poll: the serving end sets hooks (slot `[77]` of
+  `client-session-changed`, `window-pane-changed` and the like, each running
+  `wait-for -S tsm-changed`) and waits on that channel, so a pane switch over
+  there is in the cache here one trip later. The hooks stay set after the
+  relay goes, signalling nobody; a `set-hook -g` of your own replaces them
+  until the next heartbeat sets them again. Commands and directories have no
+  hook and go up with the heartbeat.
 
 Relay connections use ssh (never mosh, which has no side channel), so they
 work alongside an interactive mosh session and reconnect after sleep or a

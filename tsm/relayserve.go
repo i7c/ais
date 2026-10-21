@@ -43,12 +43,15 @@ func (w *wireWriter) send(m wire) error {
 }
 
 const (
-	pushEvery = 2 * time.Second
 	// Even with nothing changed, the picture goes up this often, so the
 	// popup above can tell a quiet host from a lost one (it calls a picture
-	// older than 10s stale).
+	// older than 10s stale). It is also when changes no tmux hook announces
+	// (a pane's command or directory) go up.
 	pushAtLeast = 5 * time.Second
 	ackWait     = 9 * time.Second
+	// settleFor is how long a change is given to finish before the picture
+	// is taken: one switch fires several hooks at once.
+	settleFor = 20 * time.Millisecond
 )
 
 // reclaimEvery is how often a serving relay checks that its socket is still
@@ -177,9 +180,39 @@ func serveRelay(t Tmux, a Ais, in io.Reader, out io.Writer) int {
 		}
 	}()
 
-	go pushState(t, a, w, done)
+	poked := make(chan struct{}, 1)
+	go watchTmux(t, poked, done)
+	// The waiter is left to end on its own, never killed (see WaitChanged):
+	// wake it on the way out.
+	defer t.SignalChanged()
+	go pushState(t, a, w, done, poked)
 	<-done
 	return 0
+}
+
+// watchTmux passes on each change tmux signals, until done.
+func watchTmux(t Tmux, poked chan<- struct{}, done <-chan struct{}) {
+	for {
+		err := t.WaitChanged()
+		select {
+		case <-done:
+			return
+		default:
+		}
+		if err != nil {
+			// No tmux server (yet): try again when the heartbeat would.
+			select {
+			case <-done:
+				return
+			case <-time.After(pushAtLeast):
+			}
+			continue
+		}
+		select {
+		case poked <- struct{}{}:
+		default: // one is pending already: it covers this one too
+		}
+	}
 }
 
 // listening is whether something answers on the unix socket at path.
@@ -192,14 +225,17 @@ func listening(path string) bool {
 	return true
 }
 
-// pushState sends the host's picture up whenever it changes, and at least
-// every so often, so the popup above opens on it fresh.
-func pushState(t Tmux, a Ais, w *wireWriter, done <-chan struct{}) {
+// pushState sends the host's picture up the moment tmux says it changed, and
+// at least every so often, so the popup above opens on it fresh — on the pane
+// you are looking at here, even right after you moved.
+func pushState(t Tmux, a Ais, w *wireWriter, done, poked <-chan struct{}) {
 	var last []byte
-	var lastAis, lastPush time.Time
+	var lastAis time.Time
 	var st *AisState
-	tick := time.NewTicker(pushEvery)
-	defer tick.Stop()
+	t.HookChanges()
+	beat := time.NewTicker(pushAtLeast)
+	defer beat.Stop()
+	force := true
 	for {
 		snap, err := t.Snapshot()
 		if err == nil {
@@ -213,8 +249,8 @@ func pushState(t Tmux, a Ais, w *wireWriter, done <-chan struct{}) {
 					changed = true
 				}
 			}
-			if changed || time.Since(lastPush) >= pushAtLeast {
-				last, lastPush = key, time.Now()
+			if changed || force {
+				last = key
 				p := &Payload{Proto: proto, Host: hostname(), Snap: snap, State: st, Clients: clients, At: time.Now()}
 				p.Places = Places(snap, st, nil, Roots())
 				if w.send(wire{Type: "state", Payload: p}) != nil {
@@ -222,10 +258,19 @@ func pushState(t Tmux, a Ais, w *wireWriter, done <-chan struct{}) {
 				}
 			}
 		}
+		force = false
 		select {
 		case <-done:
 			return
-		case <-tick.C:
+		case <-poked:
+			time.Sleep(settleFor)
+			select {
+			case <-poked: // the rest of the same change
+			default:
+			}
+		case <-beat.C:
+			force = true
+			t.HookChanges()
 		}
 	}
 }

@@ -3,11 +3,14 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -270,4 +273,95 @@ func TestALiveTakeoverIsLeftAlone(t *testing.T) {
 	if now, err := os.Stat(sock); err != nil || !os.SameFile(now, newer) {
 		t.Fatal("the newer connection lost its socket")
 	}
+}
+
+// Where you look on this host goes up the moment tmux says it changed, not
+// when the heartbeat comes round.
+func TestAChangeGoesUpAtOnce(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	snapOut := strings.Join([]string{
+		line("$1", "s", "@1", 1, "w", "%1", 1, "zsh", "/"),
+		line("$1", "s", "@1", 1, "w", "%2", 2, "zsh", "/"),
+		clientMarker + strings.Join([]string{"", "", "", "0"}, sep),
+	}, "\n")
+	var mu sync.Mutex
+	looking := "%1"
+	r := &fakeRunner{reply: func(args []string) string {
+		if args[0] == "list-clients" {
+			mu.Lock()
+			defer mu.Unlock()
+			return strings.Join([]string{"/dev/pts/3", "0", "$1", looking, "1"}, sep) + "\n"
+		}
+		return snapOut
+	}}
+	upR, upW := io.Pipe()
+	done, poked := make(chan struct{}), make(chan struct{}, 1)
+	defer close(done)
+	go pushState(Tmux{r: r}, Ais{}, &wireWriter{enc: json.NewEncoder(upW)}, done, poked)
+	states := make(chan *Payload)
+	go func() {
+		dec := json.NewDecoder(upR)
+		for {
+			var m wire
+			if dec.Decode(&m) != nil {
+				return
+			}
+			states <- m.Payload
+		}
+	}()
+	viewing := func(within time.Duration) string {
+		select {
+		case p := <-states:
+			return p.Clients[0].PaneID
+		case <-time.After(within):
+			return "nothing"
+		}
+	}
+	if got := viewing(time.Second); got != "%1" {
+		t.Fatalf("first picture: looking at %s", got)
+	}
+	mu.Lock()
+	looking = "%2"
+	mu.Unlock()
+	poked <- struct{}{}
+	if got := viewing(pushAtLeast / 5); got != "%2" {
+		t.Fatalf("after the change: %s, the heartbeat is %s away", got, pushAtLeast)
+	}
+	if r.find("set-hook") == nil {
+		t.Fatal("tmux was never asked to announce changes")
+	}
+}
+
+// tmux signals a change through hooks of tsm's own, in a slot a tmux.conf's
+// plain set-hook does not use; a hook an older tmux lacks costs only itself.
+func TestTheHooksAreSetOneByOneWhenTmuxRefusesOne(t *testing.T) {
+	r := &refuses{word: "pane-title-changed[77]"}
+	Tmux{r: r}.HookChanges()
+	if len(r.calls) != 1+len(changeHooks) {
+		t.Fatalf("%d calls", len(r.calls))
+	}
+	want := []string{"tmux", "set-hook", "-g", "window-pane-changed[77]", "wait-for -S " + changedChannel}
+	found := false
+	for _, c := range r.calls[1:] {
+		found = found || reflect.DeepEqual(c, want)
+	}
+	if !found {
+		t.Fatalf("no %q among %q", want, r.calls)
+	}
+}
+
+// refuses fails any tmux command that mentions word.
+type refuses struct {
+	word  string
+	calls [][]string
+}
+
+func (f *refuses) Run(name string, args ...string) (string, error) {
+	f.calls = append(f.calls, append([]string{name}, args...))
+	for _, a := range args {
+		if a == f.word {
+			return "", fmt.Errorf("invalid option: %s", a)
+		}
+	}
+	return "", nil
 }

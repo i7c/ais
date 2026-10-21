@@ -21,7 +21,16 @@ type execRunner struct{}
 func (execRunner) Run(name string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, name, args...)
+	return runCmd(name, exec.CommandContext(ctx, name, args...))
+}
+
+// RunUntilDone is Run for a command that takes as long as it takes: it is
+// never killed, so a "tmux wait-for" left behind just ends by itself.
+func (execRunner) RunUntilDone(name string, args ...string) (string, error) {
+	return runCmd(name, exec.Command(name, args...))
+}
+
+func runCmd(name string, cmd *exec.Cmd) (string, error) {
 	if name == "tmux" {
 		cmd.Env = tmuxEnv(os.Environ())
 	}
@@ -73,6 +82,76 @@ func tmuxEnv(env []string) []string {
 type Tmux struct{ r Runner }
 
 func (t Tmux) run(args ...string) (string, error) { return t.r.Run("tmux", args...) }
+
+// changedChannel is the wait-for channel tmux signals, through changeHooks,
+// whenever something a picture of it shows has changed.
+const changedChannel = "tsm-changed"
+
+// changeHooks are the events that change what a picture shows, the pane each
+// client is looking at first. Commands, directories and the like change
+// without an event; the heartbeat catches those.
+var changeHooks = []string{
+	"client-session-changed", "session-window-changed", "window-pane-changed",
+	"client-attached", "client-detached", "client-active",
+	"session-created", "session-closed", "session-renamed",
+	"window-linked", "window-unlinked", "window-renamed", "window-layout-changed",
+	"pane-exited", "pane-died", "pane-title-changed", "alert-bell",
+}
+
+// hookIndex is the slot tsm takes in each of those hooks' arrays, well clear
+// of the [0] your own "set-hook -g" fills.
+const hookIndex = 77
+
+// HookChanges makes tmux signal changedChannel on every change hook. It is
+// safe to repeat, and is repeated: a plain "set-hook -g" (a re-sourced
+// tmux.conf) replaces a hook's whole array, tsm's slot with it.
+func (t Tmux) HookChanges() error {
+	set := func(h string) []string {
+		return []string{"set-hook", "-g", fmt.Sprintf("%s[%d]", h, hookIndex), "wait-for -S " + changedChannel}
+	}
+	var all []string
+	for _, h := range changeHooks {
+		if len(all) > 0 {
+			all = append(all, ";")
+		}
+		all = append(all, set(h)...)
+	}
+	if _, err := t.run(all...); err == nil {
+		return nil
+	}
+	// One hook this tmux does not know stops the rest: set them one by one.
+	var err error
+	for _, h := range changeHooks {
+		if _, e := t.run(set(h)...); e != nil && err == nil {
+			err = e
+		}
+	}
+	return err
+}
+
+// untilDoner runs a command that may take as long as it likes.
+type untilDoner interface {
+	RunUntilDone(name string, args ...string) (string, error)
+}
+
+// WaitChanged returns once tmux signals changedChannel: at once if it did
+// since the last wait. It must not be killed while it waits: tmux keeps a
+// killed waiter, and from then on forgets signals nobody waits for — the ones
+// between one wait and the next.
+func (t Tmux) WaitChanged() error {
+	r, ok := t.r.(untilDoner)
+	if !ok {
+		return fmt.Errorf("tmux: cannot wait for changes here")
+	}
+	_, err := r.RunUntilDone("tmux", "wait-for", changedChannel)
+	return err
+}
+
+// SignalChanged wakes whoever waits for a change, this process's own waiter
+// among them, so it ends rather than being left behind.
+func (t Tmux) SignalChanged() {
+	t.run("wait-for", "-S", changedChannel)
+}
 
 func (t Tmux) Snapshot() (*Snapshot, error) {
 	out, err := t.run(QueryArgs()...)
