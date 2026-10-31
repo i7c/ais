@@ -277,12 +277,39 @@ def worktree_settings(config: dict) -> dict:
     if not isinstance(auto, bool):
         die("config: worktree.auto must be true or false")
 
+    start = table.get("from", "auto")
+    if start not in WT_FROM:
+        die(f"config: worktree.from must be one of {', '.join(WT_FROM)}")
+
+    detach = table.get("detach", False)
+    if not isinstance(detach, bool):
+        die("config: worktree.detach must be true or false")
+
     return {
         "base": Path(os.path.expanduser(os.path.expandvars(base))),
         "copy": [c for c in copy if c],
         "fetch": fetch,
         "auto": auto,
+        "from": start,
+        "detach": detach,
     }
+
+
+# Where a new worktree starts. origin: the remote's default branch, freshly
+# fetched. local: that branch as it is in the main checkout. head: whatever the
+# main checkout has out right now. auto: the newer of origin and local — local
+# when it holds commits not pushed yet, origin otherwise.
+WT_FROM = ("auto", "origin", "local", "head")
+
+
+def with_overrides(settings: dict, start: str | None, detach: bool | None) -> dict:
+    """The [worktree] settings with what the command line said on top."""
+    out = dict(settings)
+    if start is not None:
+        out["from"] = start
+    if detach is not None:
+        out["detach"] = detach
+    return out
 
 
 def rename_window_setting(config: dict) -> bool:
@@ -1018,21 +1045,98 @@ def repo_name(root: Path) -> str:
     return root.name
 
 
-def default_ref(root: Path) -> str:
-    """The ref a new session branch starts from: origin's default branch."""
-    for _ in range(2):
-        res = git("-C", str(root), "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD")
+def main_remote(root: Path) -> str | None:
+    """The remote a repo's default branch comes from.
+
+    origin when there is one; else the remote the checkout's own branch
+    tracks; else the first there is. Not every repo calls it origin, and one
+    that does not used to get no fetch and no default branch at all.
+    """
+    res = git("-C", str(root), "remote")
+    remotes = res.stdout.split() if res.returncode == 0 else []
+    if not remotes:
+        return None
+    if "origin" in remotes:
+        return "origin"
+    res = git("-C", str(root), "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}")
+    tracked = res.stdout.strip().split("/", 1)[0] if res.returncode == 0 else ""
+    return tracked if tracked in remotes else remotes[0]
+
+
+def has_ref(root: Path, ref: str) -> bool:
+    return git("-C", str(root), "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}").returncode == 0
+
+
+def remote_default(root: Path, remote: str) -> str | None:
+    """The remote's default branch as a remote-tracking ref, e.g. origin/main.
+
+    <remote>/HEAD is a local note of what the default was when it was last
+    asked, so it is asked again when the note is missing or points at a branch
+    that is no longer there.
+    """
+    for attempt in range(2):
+        res = git("-C", str(root), "symbolic-ref", "--quiet", f"refs/remotes/{remote}/HEAD")
         ref = res.stdout.strip() if res.returncode == 0 else ""
-        if ref:
+        if ref and has_ref(root, ref):
             return ref[len("refs/remotes/"):]
-        git("-C", str(root), "remote", "set-head", "origin", "--auto")
-    for candidate in ("origin/main", "origin/master"):
-        if git("-C", str(root), "rev-parse", "--verify", "--quiet", candidate).returncode == 0:
-            return candidate
-    # No origin at all: a local-only repo still has a HEAD worth branching from.
-    if git("-C", str(root), "rev-parse", "--verify", "--quiet", "HEAD").returncode == 0:
+        if attempt == 0:
+            git("-C", str(root), "remote", "set-head", remote, "--auto")
+    for name in ("main", "master"):
+        if has_ref(root, f"refs/remotes/{remote}/{name}"):
+            return f"{remote}/{name}"
+    return None
+
+
+def local_default(root: Path, upstream: str | None) -> str | None:
+    """The default branch as the main checkout has it: main, not origin/main."""
+    names = [upstream.split("/", 1)[1]] if upstream else []
+    for name in names + ["main", "master"]:
+        if has_ref(root, f"refs/heads/{name}"):
+            return name
+    return None
+
+
+def short_sha(root: Path, ref: str) -> str:
+    res = git("-C", str(root), "rev-parse", "--short", f"{ref}^{{commit}}")
+    return res.stdout.strip() if res.returncode == 0 else "?"
+
+
+def is_ancestor(root: Path, older: str, newer: str) -> bool:
+    return git("-C", str(root), "merge-base", "--is-ancestor", older, newer).returncode == 0
+
+
+def start_point(root: Path, mode: str) -> str:
+    """The ref a new worktree starts from, under worktree.from = mode.
+
+    A mode that has nothing to offer here — origin in a repo with no remote,
+    local with no default branch — falls back to the next best thing and says
+    so, rather than failing: from is set once in the config for every repo,
+    and not every repo has every kind of base.
+    """
+    remote = main_remote(root)
+    upstream = remote_default(root, remote) if remote else None
+    local = local_default(root, upstream)
+
+    if mode == "auto" and upstream and local:
+        if is_ancestor(root, local, upstream):
+            return upstream
+        if is_ancestor(root, upstream, local):
+            ahead = git("-C", str(root), "rev-list", "--count", f"{upstream}..{local}").stdout.strip()
+            note(f"{local} has {ahead} commit(s) not on {upstream} yet; starting from {local}")
+            return local
+        note(f"{local} and {upstream} have diverged; starting from {upstream}")
+        return upstream
+    if mode in ("auto", "origin") and upstream:
+        return upstream
+    if mode in ("auto", "origin", "local") and local:
+        if mode == "origin":
+            note(f"no remote default branch in {tilde(root)}; starting from {local}")
+        return local
+    if has_ref(root, "HEAD"):
+        if mode != "head":
+            note(f"no default branch in {tilde(root)}; starting from what it has checked out")
         return "HEAD"
-    die(f"cannot work out what to branch from in {tilde(root)} (no origin, no commits)")
+    die(f"cannot work out what to branch from in {tilde(root)} (no commits)")
 
 
 def is_worktree(path: Path) -> bool:
@@ -1078,6 +1182,9 @@ def copy_into(root: Path, dest: Path, paths: list[str]) -> None:
 def ensure_worktree(root: Path, dest: Path, branch: str, settings: dict) -> Path:
     """The worktree at dest, on branch, making it if it is not there yet.
 
+    A new branch starts where worktree.from says (see start_point); with
+    worktree.detach there is no branch at all, just the commit.
+
     An existing worktree is reused rather than refused: a restart, a second
     "ais wt add" for the same repo and a re-run of "-w" all mean "put me where
     that session works", and the answer to all three is the same directory.
@@ -1088,19 +1195,28 @@ def ensure_worktree(root: Path, dest: Path, branch: str, settings: dict) -> Path
             return dest
         die(f"{tilde(dest)} exists and is not a git worktree; move it aside")
 
-    if settings["fetch"]:
-        git("-C", str(root), "fetch", "--quiet", "origin")
+    remote = main_remote(root)
+    if settings["fetch"] and remote:
+        res = git("-C", str(root), "fetch", "--quiet", remote)
+        if res.returncode != 0:
+            why = (res.stderr.strip().splitlines() or ["unknown error"])[-1]
+            note(f"could not fetch {remote}, so {remote}/* may be out of date: {why}")
     dest.parent.mkdir(parents=True, exist_ok=True)
+    mode = settings.get("from", "auto")
 
-    if git("-C", str(root), "show-ref", "--verify", "--quiet", f"refs/heads/{branch}").returncode == 0:
-        note(f"reusing existing local branch {branch}")
+    if settings.get("detach"):
+        ref = start_point(root, mode)
+        note(f"detached at {ref} @ {short_sha(root, ref)}")
+        res = git("-C", str(root), "worktree", "add", "--detach", str(dest), ref)
+    elif has_ref(root, f"refs/heads/{branch}"):
+        note(f"reusing existing local branch {branch} @ {short_sha(root, branch)}; from={mode} does not apply")
         res = git("-C", str(root), "worktree", "add", str(dest), branch)
-    elif git("-C", str(root), "rev-parse", "--verify", "--quiet", f"origin/{branch}").returncode == 0:
-        note(f"tracking existing origin/{branch}")
-        res = git("-C", str(root), "worktree", "add", "--track", "-b", branch, str(dest), f"origin/{branch}")
+    elif remote and has_ref(root, f"refs/remotes/{remote}/{branch}"):
+        note(f"tracking existing {remote}/{branch} @ {short_sha(root, f'{remote}/{branch}')}")
+        res = git("-C", str(root), "worktree", "add", "--track", "-b", branch, str(dest), f"{remote}/{branch}")
     else:
-        ref = default_ref(root)
-        note(f"new branch {branch} from {ref}")
+        ref = start_point(root, mode)
+        note(f"new branch {branch} from {ref} @ {short_sha(root, ref)}")
         res = git("-C", str(root), "worktree", "add", "-b", branch, str(dest), ref)
 
     if res.returncode != 0:
@@ -1239,7 +1355,10 @@ def cmd_run(args, harness_argv: list[str]):
     if root is not None:
         # Acted on by launch, once the session has an id and a name to build
         # the path out of; never stored on the record.
-        session["worktree_request"] = {"root": str(root), "repo": repo_name(root)}
+        session["worktree_request"] = {
+            "root": str(root), "repo": repo_name(root),
+            "from": args.wt_from, "detach": args.detach,
+        }
     return launch(session, argv, settings, dry_run=args.dry_run)
 
 
@@ -1387,7 +1506,9 @@ def launch(session: dict, argv: list[str], settings: dict, dry_run: bool) -> int
         if wanted:
             name = slugify(session.get("description") or "") or session["id"]
             planned = settings["worktree"]["base"] / name / wanted["repo"]
-            print("worktree:", tilde(planned), f"(branch {name}, not created)")
+            wt = with_overrides(settings["worktree"], wanted.get("from"), wanted.get("detach"))
+            how = "detached" if wt["detach"] else f"branch {name}"
+            print("worktree:", tilde(planned), f"({how} from {wt['from']}, not created)")
         print("cwd:    ", tilde(session["cwd"]))
         print("tmux:   ", tmux_label(session))
         if settings["rename_window"]:
@@ -1440,6 +1561,7 @@ def make_session_worktree(session: dict, wanted: dict, wt: dict) -> None:
     base = wt["base"] / name
     dest = base / wanted["repo"]
     try:
+        wt = with_overrides(wt, wanted.get("from"), wanted.get("detach"))
         ensure_worktree(Path(wanted["root"]), dest, name, wt)
     except SystemExit:
         finish(session["id"], 1)
@@ -1892,7 +2014,10 @@ def cmd_wt_add(args):
     get somewhere safe to put it.
     """
     session = current_session()
-    wt = worktree_settings(load_config())
+    wt = with_overrides(
+        worktree_settings(load_config()),
+        getattr(args, "wt_from", None), getattr(args, "detach", None),
+    )
 
     target = os.path.expanduser(args.repo or ".")  # no argument: the repo we stand in
     root = repo_root(target)
@@ -2317,7 +2442,10 @@ def cmd_state(args):
     wt = worktree_settings(config)
     return emit_json({
         "host": host,
-        "worktree": {"base": str(wt["base"]), "auto": wt["auto"]},
+        "worktree": {
+            "base": str(wt["base"]), "auto": wt["auto"],
+            "from": wt["from"], "detach": wt["detach"],
+        },
         "notify_window": notify_settings()["window"],
         "profiles": [public_profile(name, config) for name in profile_names(config)],
         "sessions": out,
@@ -2938,6 +3066,10 @@ run:
                                      branch of that name, and start the profile
                                      there. Fails if this is not a repo.
       --no-worktree                  run here, even with worktree.auto on
+      --from auto|origin|local|head  what the worktree starts from (default:
+                                     worktree.from, which defaults to auto)
+      --[no-]detach                  a detached worktree, no branch (default:
+                                     worktree.detach, which defaults to off)
       --cwd DIR                      start in DIR rather than here
       --fork ID                      start a copy of session ID beside it: same
                                      profile, directory and worktree, with its
@@ -2995,7 +3127,8 @@ commands:
                    the agent.
   wt <cmd>         worktrees for this session, all under one directory:
                      add [repo]   worktree of repo (default: here) at
-                                  <base>/<session name>/<repo>; prints the path
+                                  <base>/<session name>/<repo>; prints the path.
+                                  Takes --from and --[no-]detach, as -w does.
                      ls [-a]      this session's worktrees (-a: every session's)
                      path [repo]  print one path, for cd
                      prune        drop registrations git holds for worktrees
@@ -3016,6 +3149,15 @@ worktrees:
   auto = true under [worktree] makes that the default: every session gets a
   worktree when you start it inside a repo, and runs where you are when you do
   not. Only a -w you typed yourself insists — that one fails outside a repo.
+
+  A new branch starts where worktree.from says (--from overrides it):
+    origin  the remote's default branch, e.g. origin/main, after a fetch
+    local   that branch as the main checkout has it, e.g. main
+    head    whatever commit the main checkout has out right now
+    auto    origin, unless local holds commits origin does not have yet: then
+            local. If the two have diverged, origin, with a warning. (default)
+  detach = true (or --detach) gives the worktree that commit and no branch.
+  A branch of the session's name that already exists is reused as it is.
 
 tmux:
   A session renames its window after itself while it runs — the session name,
@@ -3052,6 +3194,12 @@ def split_argv(argv: list[str]) -> tuple[list[str], list[str] | None]:
     return argv[:at], argv[at + 1:]
 
 
+def add_worktree_options(parser: argparse.ArgumentParser) -> None:
+    """How a new worktree is made; None means worktree.from / .detach decide."""
+    parser.add_argument("--from", dest="wt_from", choices=WT_FROM, default=None)
+    parser.add_argument("--detach", action=argparse.BooleanOptionalAction, default=None)
+
+
 def run_parser() -> argparse.ArgumentParser:
     """The flags a session start takes, whether it came as "run" or "--"."""
     parser = argparse.ArgumentParser(prog=PROG, add_help=False)
@@ -3061,6 +3209,7 @@ def run_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "-w", "--worktree", action=argparse.BooleanOptionalAction, default=None,
     )
+    add_worktree_options(parser)
     parser.add_argument("--cwd", default=None, metavar="DIR")
     parser.add_argument("--fork", default=None, metavar="ID")
     parser.add_argument("-n", "--dry-run", action="store_true")
@@ -3075,8 +3224,10 @@ def start_session(ais_args: list[str], harness_argv: list[str]) -> int:
         return 0
     if unknown:
         die(f"unknown option(s): {' '.join(unknown)}")
-    if args.fork and args.worktree:
+    if args.fork and (args.worktree or args.wt_from or args.detach is not None):
         die("--fork runs in the session's own directory; -w has nothing to do there")
+    if args.worktree is False and (args.wt_from or args.detach is not None):
+        die("--from and --detach say how to make a worktree; --no-worktree makes none")
     if not harness_argv and not args.fork:
         die(f"name the profile to start, e.g. {PROG} run claude")
     return cmd_run(args, harness_argv)
@@ -3148,6 +3299,7 @@ def main(argv: list[str]) -> int:
     p_wt.add_argument("subcommand", nargs="?", default="ls")
     p_wt.add_argument("repo", nargs="?", default=None)
     p_wt.add_argument("-a", "--all", action="store_true")
+    add_worktree_options(p_wt)
     p_wt.set_defaults(fn=cmd_wt)
 
     p_current = subs.add_parser("current", add_help=False)

@@ -116,6 +116,8 @@ base = "~/wt"
 copy = [".env", ".claude/settings.local.json"]   # untracked files a checkout needs
 fetch = true
 auto = false                                     # -w by default, where it applies
+from = "auto"                                    # auto | origin | local | head
+detach = false                                   # true: the commit, no branch
 ```
 
 `$AIS_WT_BASE` overrides `base` for a single run.
@@ -124,6 +126,27 @@ auto = false                                     # -w by default, where it appli
 gets one without `-w`, start one anywhere else and it just runs where you are.
 Only a `-w` you typed yourself insists on a repo and fails without one; pass
 `--no-worktree` to opt a single run out.
+
+`from` decides the commit a new session branch starts at; `--from` overrides it
+for one run (`ais -w --from head -- claude`, `ais wt add --from local ~/git/x`):
+
+| from     | starts at                                                       |
+|----------|-----------------------------------------------------------------|
+| `origin` | the remote's default branch (`origin/main`), after a fetch      |
+| `local`  | that branch as the main checkout has it (`main`)                |
+| `head`   | whatever commit the main checkout has out right now             |
+| `auto`   | `origin`, unless `main` holds commits not pushed yet: then `main` |
+
+`auto` exists because `origin` alone starts every session behind a `main` you
+merged into but have not pushed. When the two have diverged it takes `origin`
+and says so. Whichever it picks, ais prints the ref and commit
+(`new branch foo from origin/main @ ccbc36a`), and a fetch that fails is
+reported rather than silently leaving `origin/*` where it was. A branch of the
+session's name that already exists is reused as it is, whatever `from` says.
+
+`detach = true` (or `--detach`) makes the worktree on that commit with no branch
+at all. Commits made there are only reachable from the worktree, so `ais prune`
+counts them as unpushed and keeps it.
 
 ## Notifications from servers
 

@@ -623,8 +623,24 @@ class WorktreeSettings(unittest.TestCase):
         self.assertIs(ais.worktree_settings({})["auto"], False)
         self.assertIs(ais.worktree_settings({"worktree": {"auto": True}})["auto"], True)
 
+    def test_from_is_auto_and_detach_off_until_the_config_says_otherwise(self):
+        self.assertEqual(ais.worktree_settings({})["from"], "auto")
+        self.assertIs(ais.worktree_settings({})["detach"], False)
+        got = ais.worktree_settings({"worktree": {"from": "head", "detach": True}})
+        self.assertEqual((got["from"], got["detach"]), ("head", True))
+
+    def test_the_command_line_beats_from_and_detach_only_where_it_spoke(self):
+        conf = ais.worktree_settings({"worktree": {"from": "local"}})
+        self.assertEqual(ais.with_overrides(conf, None, None), conf)
+        got = ais.with_overrides(conf, "origin", True)
+        self.assertEqual((got["from"], got["detach"]), ("origin", True))
+        self.assertEqual(conf["from"], "local")  # the settings themselves untouched
+
     def test_nonsense_is_refused(self):
-        for table in ({"base": 7}, {"copy": [1]}, {"fetch": "yes"}, {"auto": "yes"}):
+        for table in (
+            {"base": 7}, {"copy": [1]}, {"fetch": "yes"}, {"auto": "yes"},
+            {"from": "upstream"}, {"detach": "yes"},
+        ):
             with self.assertRaises(SystemExit):
                 ais.worktree_settings({"worktree": table})
 
@@ -693,6 +709,125 @@ class WorktreeWanted(unittest.TestCase):
             ais.worktree_root(True, False)
         with self.assertRaises(SystemExit):
             ais.worktree_root(True, True)
+
+
+class WorktreeStart(unittest.TestCase):
+    """Which commit a new worktree starts at, under each worktree.from."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.repo = Repo(self.root, "widget")
+        self.base = self.root / "wt"
+        self.notes = []
+        self.real_note = ais.note
+        ais.note = self.notes.append
+
+    def tearDown(self):
+        ais.note = self.real_note
+        self.tmp.cleanup()
+
+    def commit(self, msg, where=None):
+        where = where or self.repo.path
+        (Path(where) / "README").write_text(msg + "\n")
+        subprocess.run(["git", "-C", str(where), "commit", "--quiet", "-am", msg], check=True)
+        return self.sha(where, "HEAD")
+
+    def sha(self, where, ref):
+        return subprocess.run(
+            ["git", "-C", str(where), "rev-parse", ref], check=True, capture_output=True, text=True,
+        ).stdout.strip()
+
+    def pushed_elsewhere(self, msg):
+        """A commit that reaches origin without passing through our checkout."""
+        other = self.root / "other"
+        subprocess.run(["git", "clone", "--quiet", str(self.repo.origin), str(other)], check=True)
+        for k, v in (("user.email", "t@example.com"), ("user.name", "Test")):
+            subprocess.run(["git", "-C", str(other), "config", k, v], check=True)
+        sha = self.commit(msg, other)
+        subprocess.run(["git", "-C", str(other), "push", "--quiet", "origin", "main"], check=True)
+        return sha
+
+    def make(self, name="s", fetch=True, **wt):
+        settings = {"base": self.base, "copy": [], "fetch": fetch, "from": "auto", "detach": False}
+        settings.update(wt)
+        dest = ais.ensure_worktree(self.repo.path, self.base / name / "widget", name, settings)
+        return dest, self.sha(dest, "HEAD")
+
+    def test_auto_takes_an_unpushed_local_main(self):
+        local = self.commit("merged, not pushed")
+        _, at = self.make()
+        self.assertEqual(at, local)
+        self.assertTrue(any("not on origin/main yet" in n for n in self.notes))
+
+    def test_auto_takes_origin_when_it_is_ahead(self):
+        remote = self.pushed_elsewhere("pushed from elsewhere")
+        _, at = self.make()
+        self.assertEqual(at, remote)
+
+    def test_auto_takes_origin_and_warns_when_the_two_diverged(self):
+        remote = self.pushed_elsewhere("theirs")
+        self.commit("ours")
+        _, at = self.make()
+        self.assertEqual(at, remote)
+        self.assertTrue(any("diverged" in n for n in self.notes))
+
+    def test_origin_ignores_unpushed_local_commits(self):
+        pushed = self.sha(self.repo.path, "HEAD")
+        self.commit("not pushed")
+        _, at = self.make(**{"from": "origin"})
+        self.assertEqual(at, pushed)
+
+    def test_local_ignores_origin(self):
+        local = self.sha(self.repo.path, "main")
+        self.pushed_elsewhere("pushed from elsewhere")
+        _, at = self.make(**{"from": "local"})
+        self.assertEqual(at, local)
+
+    def test_head_is_what_the_main_checkout_has_out(self):
+        self.repo.git("checkout", "--quiet", "-b", "feature")
+        feature = self.commit("on a feature branch")
+        _, at = self.make(**{"from": "head"})
+        self.assertEqual(at, feature)
+        _, at = self.make("t", **{"from": "local"})
+        self.assertNotEqual(at, feature)
+
+    def test_detach_makes_no_branch(self):
+        dest, at = self.make(detach=True)
+        self.assertEqual(ais.worktree_branch(dest), "(detached)")
+        self.assertEqual(at, self.sha(self.repo.path, "main"))
+        heads = self.repo.git("branch", "--list", "s").stdout
+        self.assertEqual(heads.strip(), "")
+
+    def test_work_in_a_detached_worktree_counts_as_unpushed(self):
+        dest, _ = self.make(detach=True)
+        self.commit("wip", dest)
+        self.assertEqual(ais.worktree_state(dest), "+1 unpushed")
+
+    def test_an_existing_branch_wins_over_from_and_says_so(self):
+        self.repo.git("branch", "s")
+        old = self.sha(self.repo.path, "s")
+        self.commit("newer main")
+        _, at = self.make()
+        self.assertEqual(at, old)
+        self.assertTrue(any("does not apply" in n for n in self.notes))
+
+    def test_a_remote_not_called_origin_is_still_fetched_and_followed(self):
+        self.repo.git("remote", "rename", "origin", "local")
+        remote = self.pushed_elsewhere("pushed from elsewhere")
+        _, at = self.make(**{"from": "origin"})
+        self.assertEqual(at, remote)
+
+    def test_a_failed_fetch_is_reported(self):
+        self.repo.git("remote", "set-url", "origin", str(self.root / "gone.git"))
+        _, at = self.make()
+        self.assertEqual(at, self.sha(self.repo.path, "main"))
+        self.assertTrue(any("could not fetch origin" in n for n in self.notes))
+
+    def test_a_repo_with_no_remote_starts_from_its_main(self):
+        self.repo.git("remote", "remove", "origin")
+        _, at = self.make(**{"from": "origin"})
+        self.assertEqual(at, self.sha(self.repo.path, "main"))
 
 
 class WorktreeBasics(unittest.TestCase):
