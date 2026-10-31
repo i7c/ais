@@ -19,7 +19,9 @@ const shellProfile = "" // the choice that is no profile: a plain shell
 type CreateSpec struct {
 	Profile  string // shellProfile for a plain shell
 	Dir      string
-	Worktree bool // give an ais session a worktree of its own (-w)
+	Worktree bool   // give an ais session a worktree of its own (-w)
+	From     string // what the worktree starts at (--from); "" leaves it to ais
+	Detach   *bool  // a detached worktree (--[no-]detach); nil leaves it to ais
 	Place    Placement
 	About    string // ais -d; for a shell, the window or session name
 	Anchor   *Pane  // what NewWindow and the splits are placed next to
@@ -34,6 +36,14 @@ func (c CreateSpec) Argv(ais string) []string {
 	argv := []string{ais, "run", c.Profile}
 	if c.Worktree {
 		argv = append(argv, "-w")
+		if c.From != "" {
+			argv = append(argv, "--from", c.From)
+		}
+		if c.Detach != nil && *c.Detach {
+			argv = append(argv, "--detach")
+		} else if c.Detach != nil {
+			argv = append(argv, "--no-detach")
+		}
 	} else {
 		argv = append(argv, "--no-worktree")
 	}
@@ -322,6 +332,8 @@ type lastCreate struct {
 	Profile  string    `json:"profile"`
 	Place    Placement `json:"place"`
 	Worktree *bool     `json:"worktree,omitempty"`
+	From     string    `json:"from,omitempty"`
+	Detach   *bool     `json:"detach,omitempty"`
 }
 
 func lastCreatePath() string { return filepath.Join(cacheDir(), "last-create.json") }

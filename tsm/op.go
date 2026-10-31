@@ -29,13 +29,18 @@ type WireSpec struct {
 	Profile  string    `json:"profile"`
 	Dir      string    `json:"dir"`
 	Worktree bool      `json:"worktree"`
+	From     string    `json:"from,omitempty"`
+	Detach   *bool     `json:"detach,omitempty"`
 	Place    Placement `json:"place"`
 	About    string    `json:"about"`
 	Anchor   string    `json:"anchor,omitempty"`
 }
 
 func (c CreateSpec) Wire() *WireSpec {
-	w := &WireSpec{Profile: c.Profile, Dir: c.Dir, Worktree: c.Worktree, Place: c.Place, About: c.About}
+	w := &WireSpec{
+		Profile: c.Profile, Dir: c.Dir, Worktree: c.Worktree, From: c.From, Detach: c.Detach,
+		Place: c.Place, About: c.About,
+	}
 	if c.Anchor != nil {
 		w.Anchor = c.Anchor.ID
 	}
@@ -116,7 +121,10 @@ func Exec(acts Actions, st *AisState, op Op) (Outcome, error) {
 			return Outcome{}, fmt.Errorf("create without a spec")
 		}
 		c := op.Create
-		spec := CreateSpec{Profile: c.Profile, Dir: c.Dir, Worktree: c.Worktree, Place: c.Place, About: c.About}
+		spec := CreateSpec{
+			Profile: c.Profile, Dir: c.Dir, Worktree: c.Worktree, From: c.From, Detach: c.Detach,
+			Place: c.Place, About: c.About,
+		}
 		if c.Anchor != "" {
 			spec.Anchor = acts.snap.Pane(c.Anchor)
 		}

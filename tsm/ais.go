@@ -20,6 +20,10 @@ type AisState struct {
 	Worktree     struct {
 		Base string `json:"base"`
 		Auto bool   `json:"auto"`
+		// From and Detach are how ais makes a worktree when nobody says
+		// otherwise. From is empty from an ais too old to be told.
+		From   string `json:"from"`
+		Detach bool   `json:"detach"`
 	} `json:"worktree"`
 	Profiles []AisProfile `json:"profiles"`
 	Sessions []AisSession `json:"sessions"`

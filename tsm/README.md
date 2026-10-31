@@ -84,6 +84,8 @@ below), so you navigate from where you are rather than from the top.
            ▸ ~/git/widget                    ⎇ repo
              ~/wt/fix-lexer/widget           ⎇ worktree
  worktree   new  here
+ from       auto  origin  local  head
+ as         branch  detached
  place      window in soi  split right  split below  new session
  about     port the parser
 
@@ -100,10 +102,16 @@ below), so you navigate from where you are rather than from the top.
   passes `--no-worktree`, so the answer holds whatever `worktree.auto` says.
   "Another agent on that repo" is a repo plus `new`; "another agent in that
   worktree" is the worktree plus `here` (or `d` on the agent).
+- **from** and **as**, shown with `new`, are ais's `worktree.from` and
+  `worktree.detach`: what the worktree starts at (the newer of `main` and
+  `origin/main`, `origin/main`, `main`, or whatever the checkout has out) and
+  whether it gets a branch. They open on that host's own settings, and only a
+  choice that differs from them is passed (`--from`, `--[no-]detach`). An ais
+  too old to report them gets neither question.
 - **place** puts it after the selection's window, beside the selection, or in
   a session of its own, named like the work (`ais name --of`).
 - `tab` moves between fields, `←→` changes a choice, `↑↓` picks a directory,
-  `⏎` starts from any field. What, place and worktree default to what you
+  `⏎` starts from any field. What, place, worktree, from and as default to what you
   chose last (kept in `~/.cache/tsm/`), and the form opens on where — so
   `n`, a few letters of a repo, `⏎` is the common case.
 

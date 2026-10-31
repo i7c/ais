@@ -148,3 +148,60 @@ func TestTheFormRemembersTheLastChoices(t *testing.T) {
 		t.Fatal("without ais there is only the shell")
 	}
 }
+
+func TestTheCommandSaysHowTheWorktreeIsMade(t *testing.T) {
+	yes, no := true, false
+	c := CreateSpec{Profile: "claude", Worktree: true, From: "head", Detach: &yes}
+	if got := ShellJoin(c.Argv("ais")); got != "ais run claude -w --from head --detach" {
+		t.Fatalf("got %q", got)
+	}
+	c.From, c.Detach = "", &no
+	if got := ShellJoin(c.Argv("ais")); got != "ais run claude -w --no-detach" {
+		t.Fatalf("got %q", got)
+	}
+	c.Worktree = false
+	if got := ShellJoin(c.Argv("ais")); got != "ais run claude --no-worktree" {
+		t.Fatalf("no worktree, nothing to say about making one: got %q", got)
+	}
+}
+
+func TestTheFormSaysOnlyWhatDiffersFromTheHost(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	snap := fixture()
+	st := &AisState{API: 1, Profiles: []AisProfile{{Name: "claude"}}}
+	st.Worktree.Auto, st.Worktree.From = true, "local"
+	repo := []Place{{Dir: t.TempDir(), Repo: true}}
+
+	f := newCreateForm(snap, st, snap.Pane("%1"), true, repo)
+	if !f.startApplies() || wtFroms[f.from].name != "local" || f.detach {
+		t.Fatal("starts on the host's own from and detach")
+	}
+	if spec, _ := f.Spec(); spec.From != "" || spec.Detach != nil {
+		t.Fatalf("the host's defaults need no flags, got %+v", spec)
+	}
+	f.focus = fFrom
+	f.cycle(1)
+	f.focus = fDetach
+	f.cycle(1)
+	spec, _ := f.Spec()
+	if spec.From != "head" || spec.Detach == nil || !*spec.Detach {
+		t.Fatalf("a changed choice is passed on, got %+v", spec)
+	}
+	f.remember()
+
+	f = newCreateForm(snap, st, snap.Pane("%1"), true, repo)
+	if wtFroms[f.from].name != "head" || !f.detach {
+		t.Fatal("the last choice is offered again")
+	}
+
+	f.worktree = false
+	if f.applies(fFrom) || f.applies(fDetach) {
+		t.Fatal("without a worktree there is nothing to say about making one")
+	}
+
+	st.Worktree.From = "" // an ais that does not know --from
+	f = newCreateForm(snap, st, snap.Pane("%1"), true, repo)
+	if spec, _ := f.Spec(); f.startApplies() || spec.From != "" || spec.Detach != nil {
+		t.Fatal("an old ais is never told what it cannot understand")
+	}
+}

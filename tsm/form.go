@@ -16,12 +16,32 @@ const (
 	fWhat formField = iota
 	fWhere
 	fWorktree
+	fFrom
+	fDetach
 	fPlace
 	fAbout
 	fieldCount
 )
 
 var placements = []Placement{NewWindow, SplitRight, SplitBelow, NewSession}
+
+// wtFroms are ais's worktree.from values, each with what it starts the
+// worktree at.
+var wtFroms = []struct{ name, what string }{
+	{"auto", "the newer of main and origin/main"},
+	{"origin", "origin/main, freshly fetched"},
+	{"local", "main as this checkout has it"},
+	{"head", "whatever this checkout has out"},
+}
+
+func wtFromIndex(name string) (int, bool) {
+	for i, f := range wtFroms {
+		if f.name == name {
+			return i, true
+		}
+	}
+	return 0, false
+}
 
 // createForm is the "n" screen. It starts on where, since that is the
 // choice that differs most from one time to the next; what and place
@@ -34,13 +54,19 @@ type createForm struct {
 	where    textinput.Model
 	pick     int
 	worktree bool
+	from     int  // into wtFroms
+	detach   bool // a detached worktree rather than a branch
 	place    int
 	about    textinput.Model
 	focus    formField
 	anchor   *Pane
 	host     *Host // where it is made; nil for this host
 	auto     bool  // ais worktree.auto: the default for a repo
-	err      string
+	// ais worktree.from and .detach, what it does when not told; hostFrom
+	// is empty from an ais that cannot be told, which hides both choices.
+	hostFrom   string
+	hostDetach bool
+	err        string
 }
 
 // places are the directories to offer, or nil to look for them here.
@@ -51,6 +77,9 @@ func newCreateForm(snap *Snapshot, st *AisState, anchor *Pane, aisOK bool, place
 			f.profiles = append(f.profiles, p.Name)
 		}
 		f.auto = st.Worktree.Auto
+		if _, ok := wtFromIndex(st.Worktree.From); ok {
+			f.hostFrom, f.hostDetach = st.Worktree.From, st.Worktree.Detach
+		}
 	}
 	f.profiles = append(f.profiles, shellProfile)
 
@@ -63,6 +92,14 @@ func newCreateForm(snap *Snapshot, st *AisState, anchor *Pane, aisOK bool, place
 	f.worktree = f.auto
 	if last.Worktree != nil {
 		f.worktree = *last.Worktree
+	}
+	f.from, _ = wtFromIndex(f.hostFrom)
+	if i, ok := wtFromIndex(last.From); ok {
+		f.from = i
+	}
+	f.detach = f.hostDetach
+	if last.Detach != nil {
+		f.detach = *last.Detach
 	}
 	for i, p := range placements {
 		if p == last.Place {
@@ -109,29 +146,64 @@ func (f *createForm) worktreeApplies() bool {
 	return ok && p.Repo && f.profile() != shellProfile
 }
 
+// startApplies: how the worktree is made only matters when one is, and can
+// only be said to an ais that understands it.
+func (f *createForm) startApplies() bool {
+	return f.worktree && f.worktreeApplies() && f.hostFrom != ""
+}
+
+func (f *createForm) applies(field formField) bool {
+	switch field {
+	case fWorktree:
+		return f.worktreeApplies()
+	case fFrom, fDetach:
+		return f.startApplies()
+	}
+	return true
+}
+
 func (f *createForm) Spec() (CreateSpec, error) {
 	p, ok := f.dir()
 	if !ok {
 		return CreateSpec{}, fmt.Errorf("no directory matches")
 	}
 	place := placements[f.place]
-	return CreateSpec{
+	spec := CreateSpec{
 		Profile:  f.profile(),
 		Dir:      p.Dir,
 		Worktree: f.worktree && f.worktreeApplies(),
 		Place:    place,
 		About:    strings.TrimSpace(f.about.Value()),
 		Anchor:   f.anchor,
-	}, nil
+	}
+	// Only what differs from the host's own settings goes on the command
+	// line, so the usual case reads as plainly as it did before.
+	if f.startApplies() {
+		if from := wtFroms[f.from].name; from != f.hostFrom {
+			spec.From = from
+		}
+		if f.detach != f.hostDetach {
+			detach := f.detach
+			spec.Detach = &detach
+		}
+	}
+	return spec, nil
 }
 
 func (f *createForm) remember() {
 	wt := f.worktree
 	last := lastCreate{Profile: f.profile(), Place: placements[f.place]}
+	prev := loadLastCreate()
 	if f.worktreeApplies() {
 		last.Worktree = &wt
-	} else if prev := loadLastCreate(); prev.Worktree != nil {
+	} else {
 		last.Worktree = prev.Worktree // not asked this time: keep the old answer
+	}
+	if f.startApplies() {
+		detach := f.detach
+		last.From, last.Detach = wtFroms[f.from].name, &detach
+	} else {
+		last.From, last.Detach = prev.From, prev.Detach
 	}
 	saveLastCreate(last)
 }
@@ -139,7 +211,7 @@ func (f *createForm) remember() {
 func (f *createForm) moveFocus(delta int) {
 	for range fieldCount {
 		f.focus = (f.focus + formField(delta) + fieldCount) % fieldCount
-		if f.focus != fWorktree || f.worktreeApplies() {
+		if f.applies(f.focus) {
 			break
 		}
 	}
@@ -159,6 +231,10 @@ func (f *createForm) cycle(delta int) {
 		f.what = (f.what + delta + len(f.profiles)) % len(f.profiles)
 	case fWorktree:
 		f.worktree = !f.worktree
+	case fFrom:
+		f.from = (f.from + delta + len(wtFroms)) % len(wtFroms)
+	case fDetach:
+		f.detach = !f.detach
 	case fPlace:
 		n := len(placements)
 		if f.anchor == nil {
@@ -304,6 +380,20 @@ func (f *createForm) view(w, h int, ais string) []string {
 			wt = 0
 		}
 		tail = append(tail, label(fWorktree, "worktree")+choices(fWorktree, []string{"new", "here"}, wt))
+		if f.startApplies() {
+			var froms []string
+			for _, it := range wtFroms {
+				froms = append(froms, it.name)
+			}
+			detached := 0
+			if f.detach {
+				detached = 1
+			}
+			tail = append(tail,
+				label(fFrom, "from")+choices(fFrom, froms, f.from),
+				label(fDetach, "as")+choices(fDetach, []string{"branch", "detached"}, detached),
+			)
+		}
 	}
 	tail = append(tail,
 		label(fPlace, "place")+choices(fPlace, places, at),
@@ -319,7 +409,15 @@ func (f *createForm) view(w, h int, ais string) []string {
 			fg(cDim).Render(fmt.Sprintf("%-10s", "runs"))+fg(cMuted).Render(run),
 			fg(cDim).Render(fmt.Sprintf("%-10s", "in"))+fg(cMuted).Render(shortDir(spec.Dir, max(10, w-10))),
 		)
-		if spec.Worktree {
+		switch {
+		case spec.Worktree && f.startApplies():
+			what := "on a branch named after the session"
+			if f.detach {
+				what = "detached, named after the session"
+			}
+			tail = append(tail, fg(cDim).Render(strings.Repeat(" ", 10)+
+				"(ais makes the worktree at "+wtFroms[f.from].what+", "+what+")"))
+		case spec.Worktree:
 			tail = append(tail, fg(cDim).Render(strings.Repeat(" ", 10)+"(ais makes the worktree from this repo, named after the session)"))
 		}
 	}
