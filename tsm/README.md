@@ -40,7 +40,12 @@ is still a full tmux manager, just without the agent layer.
 ```
 
 - **needs you** — ais sessions whose last notification is recent and was not
-  already seen, listed first so they are a few keys up. A window that rang
+  already seen, listed first so they are a few keys up. Seen means its pane
+  was on screen when it called, or has stayed on screen for a few seconds
+  since (ais's `[notify] seen_after`, however you got there). For a remote
+  you look at through `tsm attach`, `tsm relay` is what tells: the remote's
+  tmux keeps showing the pane whether or not you are, so the relay here
+  watches for the pane that reaches it, and passes the look down. A window that rang
   the terminal bell while you were not looking joins them (weechat's default
   `beep` trigger rings it for highlights and private messages), until you
   visit it and tmux clears the flag. Remote ones too, including a bell in

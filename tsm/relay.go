@@ -41,6 +41,15 @@ type relay struct {
 	inTmux bool
 	mu     sync.Mutex
 	status relayStatus
+	conns  map[string]*relayConn // by remote name, while connected
+	poked  chan struct{}         // something you may be looking at changed
+}
+
+// relayConn is one live connection, and the latest picture it sent up.
+type relayConn struct {
+	conf    RemoteConf
+	w       *wireWriter
+	payload *Payload
 }
 
 func statusPath() string { return filepath.Join(cacheDir(), "relay.json") }
@@ -90,12 +99,21 @@ func runRelay(t Tmux, conf Config) int {
 		return 0 // one is running already; that one will do
 	}
 	rl := &relay{tmux: t, inTmux: os.Getenv("TMUX") != "",
-		status: relayStatus{PID: os.Getpid(), Started: time.Now(), Remotes: map[string]remoteState{}}}
+		status: relayStatus{PID: os.Getpid(), Started: time.Now(), Remotes: map[string]remoteState{}},
+		conns:  map[string]*relayConn{}, poked: make(chan struct{}, 1)}
+	if rl.inTmux {
+		t.HookChanges()
+		go watchTmux(t, rl.poked, nil)
+		go rl.watchSeen()
+	}
 	for _, rc := range conf.Remotes {
 		go rl.keep(Remote{Conf: rc})
 	}
 	for {
 		time.Sleep(10 * time.Second)
+		if rl.inTmux {
+			t.HookChanges() // a re-sourced tmux.conf takes them away
+		}
 		// Started from tmux.conf: when the server goes, so does its relay.
 		if rl.inTmux {
 			if _, err := t.run("list-sessions", "-F", "x"); err != nil {
@@ -149,6 +167,17 @@ func (rl *relay) session(r Remote) (heard bool, err error) {
 
 	w := &wireWriter{enc: json.NewEncoder(stdin)}
 	name := r.Conf.Name
+	conn := &relayConn{conf: r.Conf, w: w}
+	rl.mu.Lock()
+	rl.conns[name] = conn
+	rl.mu.Unlock()
+	defer func() {
+		rl.mu.Lock()
+		if rl.conns[name] == conn {
+			delete(rl.conns, name)
+		}
+		rl.mu.Unlock()
+	}()
 	if err := w.send(wire{Type: "hello", Proto: proto, Since: loadSince(name)}); err != nil {
 		return false, err
 	}
@@ -188,6 +217,10 @@ func (rl *relay) session(r Remote) (heard bool, err error) {
 			if m.Payload != nil && m.Payload.Snap != nil {
 				m.Payload.Snap.link()
 				r.save(m.Payload) // the popup opens on this, live
+				rl.mu.Lock()
+				conn.payload = m.Payload
+				rl.mu.Unlock()
+				rl.poke() // the pane you look at over there may have changed
 			}
 		case "error":
 			return heard, fmt.Errorf("%s: %s", name, m.Result)
@@ -218,6 +251,93 @@ func (rl *relay) route(n Note, from RemoteConf) string {
 		holdNote(n)
 	}
 	return result
+}
+
+func (rl *relay) poke() {
+	select {
+	case rl.poked <- struct{}{}:
+	default: // one is pending already: it covers this one too
+	}
+}
+
+// seenAfter is how long a pane must stay on screen for its call to be seen,
+// when the far end's ais does not say.
+const seenAfter = 3 * time.Second
+
+// A gaze is a remote pane you are looking at through the pane here that
+// reaches it, and how long you must keep at it for its call to count as seen.
+type gaze struct {
+	pane  string
+	dwell time.Duration
+	w     *wireWriter
+}
+
+// gazes is what you are looking at on each remote right now. The remote's
+// own ais cannot tell: a client attached there keeps showing its pane
+// whether or not the pane here that holds it is on your screen.
+func (rl *relay) gazes() map[string]gaze {
+	out := map[string]gaze{}
+	snap, err := rl.tmux.Snapshot()
+	if err != nil {
+		return out
+	}
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	for name, c := range rl.conns {
+		p := c.payload
+		if p == nil || p.State == nil || p.State.NotifySeenAfter == nil {
+			continue // nothing there would know what to do with it
+		}
+		hosting := hostingPane(snap, c.conf)
+		if hosting == nil || !rl.looking(hosting.ID) {
+			continue
+		}
+		if cl, ok := pickClient(p.Clients, link(hosting)); ok && cl.PaneID != "" {
+			out[name] = gaze{cl.PaneID, time.Duration(*p.State.NotifySeenAfter * float64(time.Second)), c.w}
+		}
+	}
+	return out
+}
+
+// watchSeen tells each remote when you have looked at one of its panes long
+// enough for its call to be seen: once per look, however long it lasts.
+func (rl *relay) watchSeen() {
+	type look struct {
+		pane string
+		at   time.Time
+		told bool
+	}
+	looks := map[string]*look{}
+	recheck := make(chan struct{}, 1)
+	for {
+		select {
+		case <-rl.poked:
+			time.Sleep(settleFor)
+		case <-recheck:
+		}
+		now := rl.gazes()
+		for name := range looks {
+			if g, ok := now[name]; !ok || g.pane != looks[name].pane {
+				delete(looks, name) // looked away: the next look starts over
+			}
+		}
+		for name, g := range now {
+			l := looks[name]
+			if l == nil {
+				l = &look{pane: g.pane, at: time.Now()}
+				looks[name] = l
+				time.AfterFunc(g.dwell, func() {
+					select {
+					case recheck <- struct{}{}:
+					default:
+					}
+				})
+			}
+			if !l.told && time.Since(l.at) >= g.dwell {
+				l.told = g.w.send(wire{Type: "seen", Pane: g.pane}) == nil
+			}
+		}
+	}
 }
 
 // looking: some client of this tmux is showing pane id right now.

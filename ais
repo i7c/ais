@@ -2558,6 +2558,7 @@ def cmd_state(args):
             "from": wt["from"], "detach": wt["detach"],
         },
         "notify_window": notify_settings()["window"],
+        "notify_seen_after": notify_settings()["seen_after"],
         "profiles": [public_profile(name, config) for name in profile_names(config)],
         "sessions": out,
     })

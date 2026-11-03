@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -36,15 +37,15 @@ func shortTemp(t *testing.T) string {
 
 func TestReplayIsWhatNobodySaw(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	a := aisWith(`{"id":"001","message":"old"},{"id":"002","message":"seen","delivered":true},{"id":"003","message":"looked at","suppressed":true},{"id":"004","message":"missed"}`)
+	a := aisWith(`{"id":"001","message":"old"},{"id":"002","message":"seen","delivered":true},{"id":"003","message":"looked at","suppressed":true},{"id":"004","message":"missed"},{"id":"005","message":"looked at later","seen":true}`)
 	notes, since := replay(a, "001")
-	if len(notes) != 1 || notes[0].Message != "missed" || notes[0].Pane != "%1" || since != "004" {
+	if len(notes) != 1 || notes[0].Message != "missed" || notes[0].Pane != "%1" || since != "005" {
 		t.Fatalf("notes %+v since %s", notes, since)
 	}
 	if notes[0].Title != "claude — fix it" {
 		t.Fatal(notes[0].Title)
 	}
-	if notes, since := replay(a, ""); len(notes) != 0 || since != "004" {
+	if notes, since := replay(a, ""); len(notes) != 0 || since != "005" {
 		t.Fatal("a first meeting replays nothing, and learns where now is")
 	}
 }
@@ -364,4 +365,110 @@ func (f *refuses) Run(name string, args ...string) (string, error) {
 		}
 	}
 	return "", nil
+}
+
+// seenRelay is a relay whose tmux shows pane %4, the one reaching karif, and
+// whose karif connection says you look at %9 there through it.
+func seenRelay(showing string, seenAfter *float64) (*relay, *bytes.Buffer, *sync.Mutex) {
+	r := &fakeRunner{reply: func(a []string) string {
+		switch a[0] {
+		case "list-panes":
+			return strings.Join([]string{
+				line("$1", "soi", "@1", 1, "code", "%1", 1, "zsh", "/x"),
+				line("$2", "far", "@3", 1, "karif", "%4", 1, "ssh", "/x", "", "", "", "", "karif"),
+			}, "\n") + "\n"
+		case "list-clients":
+			return strings.Join([]string{"/dev/pts/1", "1", "$1", showing, "1"}, sep) + "\n"
+		}
+		return ""
+	}}
+	var buf bytes.Buffer
+	var mu sync.Mutex
+	rl := &relay{tmux: Tmux{r: r}, conns: map[string]*relayConn{}, poked: make(chan struct{}, 1)}
+	hosting := &Pane{ID: "%4"}
+	rl.conns["karif"] = &relayConn{
+		conf: RemoteConf{Name: "karif"},
+		w:    &wireWriter{enc: json.NewEncoder(lockedWriter{&buf, &mu})},
+		payload: &Payload{
+			State:   &AisState{NotifySeenAfter: seenAfter},
+			Clients: []Client{{PaneID: "%7"}, {PaneID: "%9", Link: link(hosting)}},
+		},
+	}
+	return rl, &buf, &mu
+}
+
+type lockedWriter struct {
+	b  *bytes.Buffer
+	mu *sync.Mutex
+}
+
+func (w lockedWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.b.Write(p)
+}
+
+func TestAGazeIsThePaneYouSeeThroughTheConnection(t *testing.T) {
+	zero := 0.0
+	rl, _, _ := seenRelay("%4", &zero)
+	if g := rl.gazes()["karif"]; g.pane != "%9" {
+		t.Fatalf("looking at karif through %%4 is looking at its %%9, got %+v", g)
+	}
+	rl, _, _ = seenRelay("%1", &zero)
+	if len(rl.gazes()) != 0 {
+		t.Fatal("a client left showing the remote is not you looking at it")
+	}
+	rl, _, _ = seenRelay("%4", nil)
+	if len(rl.gazes()) != 0 {
+		t.Fatal("an ais that cannot mark calls seen is not told")
+	}
+}
+
+func TestALongEnoughLookIsToldOnce(t *testing.T) {
+	wait := 0.05
+	rl, buf, mu := seenRelay("%4", &wait)
+	go rl.watchSeen()
+	rl.poke()
+	time.Sleep(20 * time.Millisecond)
+	mu.Lock()
+	early := buf.Len()
+	mu.Unlock()
+	if early != 0 {
+		t.Fatal("told before the look was long enough")
+	}
+	time.Sleep(100 * time.Millisecond)
+	rl.poke()
+	time.Sleep(50 * time.Millisecond)
+	mu.Lock()
+	defer mu.Unlock()
+	if got := strings.Count(buf.String(), `"type":"seen"`); got != 1 || !strings.Contains(buf.String(), `"pane":"%9"`) {
+		t.Fatalf("want one seen for %%9, got %q", buf.String())
+	}
+}
+
+func TestASeenFromAboveReachesAis(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", shortTemp(t))
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	tm := Tmux{r: &fakeRunner{reply: func([]string) string { return "" }}}
+	r := &fakeRunner{reply: func([]string) string { return "" }}
+	upR, upW := io.Pipe()
+	downR, downW := io.Pipe()
+	defer downW.Close()
+	go io.Copy(io.Discard, upR)
+	go serveRelay(tm, Ais{r: r, bin: "ais"}, downR, upW)
+	json.NewEncoder(downW).Encode(wire{Type: "seen", Pane: "%9"})
+	for deadline := time.Now().Add(2 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+		r.mu.Lock()
+		got := r.find("_mark-seen")
+		r.mu.Unlock()
+		if got != nil {
+			if !reflect.DeepEqual(got, []string{"ais", "_mark-seen", "--pane", "%9"}) {
+				t.Fatalf("ran %v", got)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("ais was never told")
+		}
+	}
 }

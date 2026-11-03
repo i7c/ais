@@ -17,6 +17,9 @@ type AisState struct {
 	API          int     `json:"api"`
 	Host         string  `json:"host"`
 	NotifyWindow float64 `json:"notify_window"` // minutes
+	// How long a pane must stay on screen before its call is seen; nil from
+	// an ais too old to mark calls seen at all.
+	NotifySeenAfter *float64 `json:"notify_seen_after"` // seconds
 	Worktree     struct {
 		Base string `json:"base"`
 		Auto bool   `json:"auto"`
@@ -161,6 +164,16 @@ func ParseAisState(data []byte) (*AisState, error) {
 		return nil, fmt.Errorf("ais state speaks api %d, tsm knows %d", st.API, aisAPI)
 	}
 	return &st, nil
+}
+
+// MarkSeen tells ais that pane has been on screen long enough for its call
+// to count as seen.
+func (a Ais) MarkSeen(pane string) error {
+	if !a.Available() {
+		return fmt.Errorf("ais not found on PATH")
+	}
+	_, err := a.r.Run(a.bin, "_mark-seen", "--pane", pane)
+	return err
 }
 
 // Env is where a session runs and what a shell beside it needs.

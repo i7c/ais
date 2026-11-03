@@ -21,7 +21,7 @@ import (
 //
 // The wire is one JSON object per line, both ways.
 type wire struct {
-	Type    string   `json:"type"` // hello ack | notify replay state
+	Type    string   `json:"type"` // hello ack seen | notify replay state
 	Proto   int      `json:"proto,omitempty"`
 	Since   string   `json:"since,omitempty"`
 	ID      string   `json:"id,omitempty"`
@@ -29,6 +29,7 @@ type wire struct {
 	Note    *Note    `json:"note,omitempty"`
 	Notes   []Note   `json:"notes,omitempty"`
 	Payload *Payload `json:"payload,omitempty"`
+	Pane    string   `json:"pane,omitempty"` // seen: the pane you have been looking at
 }
 
 type wireWriter struct {
@@ -101,6 +102,12 @@ func serveRelay(t Tmux, a Ais, in io.Reader, out io.Writer) int {
 			case "hello":
 				notes, since := replay(a, m.Since)
 				w.send(wire{Type: "replay", Notes: notes, Since: since})
+			case "seen":
+				// You looked at it through the connection, which this
+				// tmux cannot tell from a client left showing it.
+				if m.Pane != "" {
+					go a.MarkSeen(m.Pane)
+				}
 			case "ack":
 				mu.Lock()
 				if ch := waiting[m.ID]; ch != nil {
