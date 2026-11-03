@@ -71,6 +71,7 @@ type AisNotification struct {
 	Message    string `json:"message"`
 	Delivered  bool   `json:"delivered"`
 	Suppressed bool   `json:"suppressed"`
+	Seen       bool   `json:"seen"` // its pane has been on screen since
 }
 
 const aisAPI = 1
@@ -94,11 +95,12 @@ func (s *AisSession) LastNotification() *AisNotification {
 }
 
 // WantsYou is true while the session's last word was a call for you, made in
-// the last window minutes and not already seen (ais suppresses the banner
-// for a pane that is on screen, which means you were looking).
+// the last window minutes and not already seen: ais suppresses the banner
+// for a pane that is on screen, which means you were looking, and marks the
+// call seen once its pane has stayed on screen for a few seconds.
 func (s *AisSession) WantsYou(window float64, now time.Time) bool {
 	n := s.LastNotification()
-	if s.Status != "active" || n == nil || n.Suppressed {
+	if s.Status != "active" || n == nil || n.Suppressed || n.Seen {
 		return false
 	}
 	age, ok := since(n.At, now)

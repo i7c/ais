@@ -289,7 +289,7 @@ func replay(a Ais, since string) ([]Note, string) {
 					if n.ID > newest {
 						newest = n.ID
 					}
-					if since == "" || n.ID <= since || n.Delivered || n.Suppressed {
+					if since == "" || n.ID <= since || n.Delivered || n.Suppressed || n.Seen {
 						continue
 					}
 					notes = append(notes, Note{

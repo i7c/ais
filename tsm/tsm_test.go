@@ -112,6 +112,11 @@ func TestWhoeverCalledComesFirst(t *testing.T) {
 	if rows := BuildRows(fixture(), st, TreeOptions{Now: now}); rows[0].Kind == RowHeader {
 		t.Fatal("a notification you were looking at does not call for you")
 	}
+	st.Sessions[0].Notifications[0].Suppressed = false
+	st.Sessions[0].Notifications[0].Seen = true
+	if rows := BuildRows(fixture(), st, TreeOptions{Now: now}); rows[0].Kind == RowHeader {
+		t.Fatal("a notification whose pane you have since looked at does not call for you")
+	}
 }
 
 func TestOldSessionsAreFoundByTheirPane(t *testing.T) {
