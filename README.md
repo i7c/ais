@@ -71,7 +71,7 @@ env = { PORT = "8001" }
 
 | Command | What it does |
 |---|---|
-| `select [id]` | Switch tmux to a session's pane. Recently-notified sessions sort first (marked `●`). `--client NAME` targets a client tmux can't infer. |
+| `select [id]` | Switch tmux to a session's pane. Sessions calling for you sort first (marked `●`): a recent notification whose pane you have not looked at since. `--client NAME` targets a client tmux can't infer. |
 | `ls [-a]` | List active sessions (`-a` includes dead ones) with time since last notification. |
 | `status [-a]` | `ls` plus the notifications themselves. |
 | `notify TEXT` | Raise a desktop notification and record it. Skipped (but still recorded) if this session's pane is already on screen; `-f/--force` sends anyway. `-t/--title`, `--tag`, `-q/--quiet`. |
@@ -147,6 +147,18 @@ session's name that already exists is reused as it is, whatever `from` says.
 `detach = true` (or `--detach`) makes the worktree on that commit with no branch
 at all. Commits made there are only reachable from the worktree, so `ais prune`
 counts them as unpushed and keeps it.
+
+## Seen
+
+A notification stops calling for you once its pane has been on screen for
+`seen_after` seconds (`[notify]`, default 3), however you got there: tsm,
+`ais select`, or plain tmux keys. Each session installs global tmux hooks
+(slot `[78]` of `window-pane-changed`, `session-window-changed`,
+`client-session-changed`, `client-attached` and `client-focus-in`) that run
+`ais _mark-seen`; it waits, checks the pane is still shown, and stamps
+`seen_at` on the notification. Flicking past a pane does not count. `status`
+still lists seen notifications; they just lose the `●`, and `ais state` says
+`"seen": true`.
 
 ## Notifications from servers
 

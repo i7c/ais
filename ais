@@ -52,6 +52,7 @@ NOTIFY_KEEP = 20          # per session
 NOTIFY_MAX_AGE = 86400    # seconds; older entries are dropped on the next write
 NOTIFY_WINDOW = 60        # minutes counted as "recent" by ls/status/select
 NOTIFY_SOUND = "Glass"
+NOTIFY_SEEN_AFTER = 3     # seconds on screen before a pane's call counts as seen
 
 # A harness conversation can be replaced mid-session (claude's /clear starts a
 # fresh one in the same process), so the ids are a history, newest last.
@@ -138,6 +139,8 @@ flags = []
 # sound = "Glass"     # macOS notification sound; "" for silent
 # window = 60         # minutes a notification stays "recent" in ls/status/select
 # when_visible = "skip"  # or "send": notify even while you are looking at the pane
+# seen_after = 3      # seconds a pane must stay on screen before its call
+                      # counts as seen, and stops being marked as waiting
 # sink = ["tsm", "notify", "--stdin"]
                       # offered every notification first, as JSON on stdin; it
                       # answers {"result": "shown"|"suppressed"} or declines by
@@ -403,10 +406,13 @@ def notify_settings() -> dict:
     sound = table.get("sound", NOTIFY_SOUND)
     window = table.get("window", NOTIFY_WINDOW)
     when_visible = table.get("when_visible", "skip")
+    seen_after = table.get("seen_after", NOTIFY_SEEN_AFTER)
     if not isinstance(sound, str):
         die("config: notify.sound must be a string")
     if not isinstance(window, (int, float)) or isinstance(window, bool) or window < 0:
         die("config: notify.window must be a non-negative number of minutes")
+    if not isinstance(seen_after, (int, float)) or isinstance(seen_after, bool) or seen_after < 0:
+        die("config: notify.seen_after must be a non-negative number of seconds")
     if when_visible not in ("skip", "send"):
         die('config: notify.when_visible must be "skip" or "send"')
     sink = table.get("sink") or []
@@ -416,6 +422,7 @@ def notify_settings() -> dict:
         die("config: notify.sink must be a command, as a list of strings")
     return {
         "sound": sound, "window": float(window), "when_visible": when_visible,
+        "seen_after": float(seen_after),
         "sink": [os.path.expanduser(s) for s in sink],
     }
 
@@ -564,6 +571,96 @@ def pane_is_visible(pane_id: str | None) -> bool:
         return all(int(p) > 0 for p in parts)
     except ValueError:
         return False
+
+
+def shown_panes() -> set[str]:
+    """The panes tmux clients are showing right now."""
+    if not shutil.which("tmux"):
+        return set()
+    res = tmux("list-clients", "-F", "#{pane_id}")
+    if res.returncode != 0:
+        return set()
+    return {line.strip() for line in res.stdout.splitlines() if line.strip()}
+
+
+def mark_seen(panes: set[str], before: str) -> list[str]:
+    """Stamp seen_at on the unseen notifications of the sessions in panes,
+    those older than the notification id before; the ids of the sessions
+    that had any.
+
+    Read first and write only if there is something to stamp: tmux runs this
+    on every switch, and nearly all of them find nothing.
+    """
+    def unseen(s: dict) -> list[dict]:
+        if s.get("status") != "active" or (s.get("tmux") or {}).get("pane_id") not in panes:
+            return []
+        return [
+            n for n in notifications_of(s)
+            if isinstance(n, dict) and not n.get("seen_at") and (n.get("id") or "") < before
+        ]
+
+    if not panes or not any(unseen(s) for s in read_sessions()):
+        return []
+
+    def apply(sessions):
+        stamp, marked = now_iso(), []
+        for s in sessions:
+            items = unseen(s)
+            for n in items:
+                n["seen_at"] = stamp
+            if items:
+                marked.append(s["id"])
+        return marked
+
+    return mutate_sessions(apply)
+
+
+def cmd_mark_seen(args):
+    """What tmux runs whenever a client changes what it shows (see
+    install_seen_hooks): wait seen_after seconds, and whatever ais pane is
+    still on screen has been seen. --pane names one instead, already looked
+    at long enough (tsm relay, which watches the screen it is shown on)."""
+    before = notification_id()
+    if args.pane:
+        panes = set(args.pane)
+    else:
+        panes = shown_panes()
+        wait = notify_settings()["seen_after"]
+        if panes and wait > 0:
+            time.sleep(wait)
+            panes &= shown_panes()
+    for sid in mark_seen(panes, before):
+        if args.verbose:
+            print(sid)
+    return 0
+
+
+# The events after which a tmux client may be showing a different pane, and
+# the slot ais takes in each hook's array: clear of the [0] a plain "set-hook
+# -g" fills, and of tsm's 77.
+SEEN_HOOKS = (
+    "window-pane-changed", "session-window-changed", "client-session-changed",
+    "client-attached", "client-focus-in",
+)
+SEEN_HOOK_INDEX = 78
+
+
+def install_seen_hooks() -> None:
+    """Have tmux run "ais _mark-seen" whenever what a client shows changes.
+
+    Global and idempotent, so every session sets them again on the way in:
+    a re-sourced tmux.conf replaces a hook's whole array, ais's slot with it.
+    By path, not by name: tmux runs it with the server's PATH, not ours.
+    """
+    if not shutil.which("tmux") or not os.environ.get("TMUX"):
+        return
+    line = shlex.join([sys.executable, str(Path(__file__).resolve()), "_mark-seen"])
+    args: list[str] = []
+    for hook in SEEN_HOOKS:
+        if args:
+            args.append(";")
+        args += ["set-hook", "-g", f"{hook}[{SEEN_HOOK_INDEX}]", f"run-shell -b {shlex.quote(line)}"]
+    tmux(*args)
 
 
 def window_name(session: dict) -> str:
@@ -806,6 +903,13 @@ def recent_notifications(session: dict, window_minutes: float) -> list[dict]:
     return out
 
 
+def calling(session: dict, window_minutes: float) -> bool:
+    """Whether the session is waiting for you: its last notification is recent
+    and nobody has looked at its pane since (see mark_seen)."""
+    last = last_notification(session)
+    return bool(last) and not last.get("seen_at") and bool(recent_notifications(session, window_minutes))
+
+
 def notify_tag(session: dict | None) -> str:
     """The short human label that tells parallel sessions apart in a banner."""
     if session:
@@ -934,6 +1038,8 @@ def cmd_notify(args):
     # answers for the shell that happens to be running this command.
     pane_id = ((session or {}).get("tmux") or {}).get("pane_id") or os.environ.get("TMUX_PANE")
     visible = pane_is_visible(pane_id)
+    if session and pane_id:
+        install_seen_hooks()  # in case a re-sourced tmux.conf took them away
     suppress = visible and settings["when_visible"] == "skip" and not args.force
 
     tag = args.tag if args.tag is not None else notify_tag(session)
@@ -1522,6 +1628,8 @@ def launch(session: dict, argv: list[str], settings: dict, dry_run: bool) -> int
         else nullcontext(False)
     )
     marked = pane_marked(pane, session) if pane else nullcontext()
+    if pane:
+        install_seen_hooks()
     # ais stands in the session's directory itself, not just its child: tmux
     # reports the directory of the pane's foreground process group, which ais
     # leads, so a split next to the agent would otherwise open wherever ais was
@@ -2218,7 +2326,7 @@ def cmd_select(args):
     # the ones that want attention is a matter of taking the first rows.
     sessions.sort(
         key=lambda s: (
-            bool(recent_notifications(s, window)),
+            calling(s, window),
             (last_notification(s) or {}).get("at") or "",
         ),
         reverse=True,
@@ -2246,7 +2354,7 @@ def pick(sessions: list[dict], here: str | None, window: float) -> dict | None:
     rows = []
     for s in sessions:
         fresh = recent_notifications(s, window)
-        mark = "●" if fresh else ("*" if s["id"] == here else " ")
+        mark = "●" if calling(s, window) else ("*" if s["id"] == here else " ")
         if fresh:
             last = fresh[-1]
             trailer = f"{age_str(seconds_since(last.get('at'))):>4}  {elide(last.get('message', ''), 34)}"
@@ -2351,7 +2459,10 @@ def public_notification(n: dict) -> dict:
         "message": n.get("message", ""),
         "delivered": bool(n.get("delivered")),
         "suppressed": bool(n.get("suppressed")),
+        "seen": bool(n.get("seen_at")),
     }
+    if n.get("seen_at"):
+        out["seen_at"] = n["seen_at"]
     if n.get("id"):
         out["id"] = n["id"]
     return out
@@ -2505,7 +2616,7 @@ def cmd_ls(args):
         # Whatever called for you goes first, most recent call at the top.
         sessions.sort(
             key=lambda s: (
-                bool(recent_notifications(s, window)),
+                calling(s, window),
                 (last_notification(s) or {}).get("at") or "",
             ),
             reverse=True,
@@ -2521,7 +2632,7 @@ def cmd_ls(args):
     )
     for s in sessions:
         last = last_notification(s)
-        mark = "●" if recent_notifications(s, window) else ("*" if s["id"] == here else " ")
+        mark = "●" if calling(s, window) else ("*" if s["id"] == here else " ")
         print(
             f"{mark} {s['id']:<11} {s.get('status', '?'):<7} {age_of(s):>4} "
             f"{age_str(seconds_since((last or {}).get('at'))):>6} "
@@ -3256,7 +3367,7 @@ def main(argv: list[str]) -> int:
     commands = (
         "select", "ls", "status", "notify", "prune", "current", "name",
         "restart", "install", "instructions", "wt", "state", "env",
-        "_preview", "_session-seen",
+        "_preview", "_session-seen", "_mark-seen",
     )
     if ais_args[0] not in commands:
         hint = f"; to run a harness, separate it with '--': {PROG} -- {shlex.join(ais_args)}"
@@ -3346,6 +3457,11 @@ def main(argv: list[str]) -> int:
     p_seen.add_argument("id", nargs="?", default=None)
     p_seen.add_argument("-v", "--verbose", action="store_true")
     p_seen.set_defaults(fn=cmd_session_seen)
+
+    p_mark = subs.add_parser("_mark-seen", add_help=False)
+    p_mark.add_argument("--pane", action="append", default=[])
+    p_mark.add_argument("-v", "--verbose", action="store_true")
+    p_mark.set_defaults(fn=cmd_mark_seen)
 
     try:
         args = parser.parse_args(ais_args)

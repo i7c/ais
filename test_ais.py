@@ -20,6 +20,7 @@ import subprocess
 import tempfile
 import tomllib
 import unittest
+import unittest.mock
 from pathlib import Path
 
 spec = importlib.util.spec_from_loader(
@@ -1289,6 +1290,103 @@ class Api(unittest.TestCase):
         second = ais.notification_id()
         self.assertLess(first[:14], second[:14] + "~")
         self.assertEqual(len(first), len(second))
+
+
+class MarkSeen(unittest.TestCase):
+    """A call stops waiting once its pane has been on screen for a while."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        home = Path(self.tmp.name)
+        self.saved = (ais.AIS_HOME, ais.CONFIG_PATH, ais.SESSIONS_PATH, ais.LOCK_PATH,
+                      ais.tmux, ais.shutil.which, ais.time.sleep)
+        ais.AIS_HOME = home
+        ais.CONFIG_PATH = home / "config.toml"
+        ais.SESSIONS_PATH = home / "sessions.json"
+        ais.LOCK_PATH = home / "sessions.lock"
+        ais.CONFIG_PATH.write_text("")
+        self.shown = [["%1", "%2"], ["%2"]]  # before the wait, after it
+        self.slept = []
+        self.calls = []
+
+        def tmux(*a, check=False):
+            self.calls.append(list(a))
+            if a[0] == "list-clients":
+                panes = self.shown.pop(0) if self.shown else []
+                return subprocess.CompletedProcess(list(a), 0, "".join(p + "\n" for p in panes), "")
+            return subprocess.CompletedProcess(list(a), 0, "", "")
+
+        ais.tmux = tmux
+        ais.shutil.which = lambda name: "/usr/bin/" + name
+        ais.time.sleep = self.slept.append
+        now = ais.now_iso()
+        self.old = ais.notification_id()
+        ais.write_sessions([
+            {"id": f"s{i}", "status": "active", "tmux": {"pane_id": f"%{i}"},
+             "notifications": [{"id": self.old, "at": now, "message": "help"}]}
+            for i in (1, 2, 3)
+        ])
+
+    def tearDown(self):
+        (ais.AIS_HOME, ais.CONFIG_PATH, ais.SESSIONS_PATH, ais.LOCK_PATH,
+         ais.tmux, ais.shutil.which, ais.time.sleep) = self.saved
+        self.tmp.cleanup()
+
+    def seen(self):
+        return {s["id"]: bool(s["notifications"][-1].get("seen_at")) for s in ais.read_sessions()}
+
+    def run_cmd(self, *panes):
+        ais.cmd_mark_seen(argparse.Namespace(pane=list(panes), verbose=False))
+
+    def test_only_a_pane_still_on_screen_after_the_wait_is_seen(self):
+        self.run_cmd()
+        self.assertEqual(self.slept, [ais.NOTIFY_SEEN_AFTER])
+        self.assertEqual(self.seen(), {"s1": False, "s2": True, "s3": False})
+
+    def test_a_named_pane_is_seen_at_once(self):
+        self.run_cmd("%3")
+        self.assertEqual(self.slept, [])
+        self.assertEqual(self.seen(), {"s1": False, "s2": False, "s3": True})
+
+    def test_seen_after_comes_from_config(self):
+        ais.CONFIG_PATH.write_text("[notify]\nseen_after = 0\n")
+        self.run_cmd()
+        self.assertEqual(self.slept, [])
+        self.assertEqual(self.seen(), {"s1": True, "s2": True, "s3": False})
+
+    def test_a_call_made_after_you_looked_still_waits(self):
+        self.assertEqual(ais.mark_seen({"%1"}, before=self.old), [])
+        self.assertFalse(self.seen()["s1"])
+
+    def test_nothing_to_stamp_writes_nothing(self):
+        before = ais.SESSIONS_PATH.stat().st_mtime_ns
+        self.assertEqual(ais.mark_seen({"%9"}, before="~"), [])
+        self.assertEqual(ais.SESSIONS_PATH.stat().st_mtime_ns, before)
+
+    def test_a_seen_call_is_not_calling_but_is_still_recent(self):
+        self.run_cmd("%1")
+        s1 = next(s for s in ais.read_sessions() if s["id"] == "s1")
+        s2 = next(s for s in ais.read_sessions() if s["id"] == "s2")
+        self.assertFalse(ais.calling(s1, 60))
+        self.assertTrue(ais.calling(s2, 60))
+        self.assertTrue(ais.recent_notifications(s1, 60))
+
+    def test_state_says_seen(self):
+        self.run_cmd("%1")
+        s1 = next(s for s in ais.read_sessions() if s["id"] == "s1")
+        n = ais.public_notification(s1["notifications"][-1])
+        self.assertTrue(n["seen"])
+        self.assertIn("seen_at", n)
+
+    def test_hooks_run_it_by_path_in_their_own_slot(self):
+        with unittest.mock.patch.dict(os.environ, {"TMUX": "/tmp/tmux-test,1,0"}):
+            ais.install_seen_hooks()
+        call = self.calls[-1]
+        self.assertEqual(call[0], "set-hook")
+        for hook in ais.SEEN_HOOKS:
+            self.assertIn(f"{hook}[{ais.SEEN_HOOK_INDEX}]", call)
+        self.assertIn(str(Path(ais.__file__).resolve()), call[3])
+        self.assertTrue(call[3].startswith("run-shell -b "))
 
 
 class Sink(unittest.TestCase):
