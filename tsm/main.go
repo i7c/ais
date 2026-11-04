@@ -17,11 +17,16 @@ const usage = `usage: tsm                open the manager (made for a tmux popup
        tsm attach NAME    connect this pane to remote NAME's tmux, and
                           mark it as the way there
        tsm snapshot       print every session, window and pane as JSON
+       tsm status [--pane ID]
+                          one line for the tmux status bar: ●need you,
+                          •active in the last 30s (not counting pane ID,
+                          the one you are looking at), panes·sessions
        tsm relay          carry notifications (and snapshots) up from the
                           remotes to here; "tsm relay status" says how it is
        tsm notify --stdin ais's [notify] sink: pass a notification up
 
   bind-key a display-popup -E -w 90% -h 80% -T " tsm " "tsm"
+  set -g status-right '#(tsm status --pane #{pane_id}) %H:%M'
 
 config: ~/.config/tsm/config.toml ($TSM_CONFIG), for remotes:
   [[remote]]
@@ -86,6 +91,8 @@ func run(args []string) int {
 				return 2
 			}
 			return attach(t, conf, args[1])
+		case "status":
+			return statusCmd(t, NewAis(execRunner{}), args[1:])
 		case "snapshot":
 			snap, err := t.Snapshot()
 			if err != nil {
