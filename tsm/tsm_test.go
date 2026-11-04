@@ -13,11 +13,11 @@ import (
 
 // line builds one list-panes line in tmux's field order.
 func line(sess, sname, win string, widx int, wname, pane string, pidx int, cmd, path string, marks ...string) string {
-	m := append(marks, "", "", "", "", "", "0")[:6]
+	m := append(marks, "", "", "", "", "", "0", "")[:7]
 	f := []string{
 		sess, sname, "1", win, fmt.Sprint(widx), wname, "1", "0", "1700000000",
 		pane, fmt.Sprint(pidx), "1", cmd, path, "42", "title", "0", "80", "24",
-		m[0], m[1], m[2], m[3], m[4], m[5],
+		m[0], m[1], m[2], m[3], m[4], m[5], m[6],
 	}
 	return strings.Join(f, sep)
 }
@@ -54,6 +54,61 @@ func TestQueryFormatMatchesTheParser(t *testing.T) {
 	args := QueryArgs()
 	if got := strings.Count(args[3], sep) + 1; got != len(paneFields) {
 		t.Fatalf("format has %d fields, parser wants %d", got, len(paneFields))
+	}
+}
+
+func TestAPaneThatWroteLatelyIsBusy(t *testing.T) {
+	now := time.Unix(1700000100, 0)
+	out := strings.Join([]string{
+		line("$1", "soi", "@1", 1, "backend", "%1", 1, "python3", "/", "", "", "", "", "", "0", "1700000090"),
+		line("$1", "soi", "@2", 2, "dev", "%2", 1, "zsh", "/", "", "", "", "", "", "0", "1700000050"),
+		line("$1", "soi", "@2", 2, "dev", "%3", 2, "tofu", "/", "", "", "", "", "", "0", "1700000075"),
+		line("$2", "irc", "@3", 1, "weechat", "%4", 1, "weechat", "/"),
+	}, "\n")
+	s := ParseSnapshot(out)
+	if p := s.Pane("%1"); p.LastOutput != 1700000090 || !p.Busy(now) {
+		t.Fatalf("10s ago is busy: %+v", p)
+	}
+	if s.Pane("%2").Busy(now) || !s.Pane("%3").Busy(now) || !s.Pane("%3").Window.Busy(now) {
+		t.Fatal("30s is the line, and one busy pane makes its window busy")
+	}
+	if !s.Pane("%4").Busy(time.Unix(1700000010, 0)) || s.Pane("%4").Busy(now) {
+		t.Fatal("without a pane time, the window's last output decides")
+	}
+}
+
+func TestTheMarkerShowsOnBusyRowsAndCollapsedSessions(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	snap := fixture()
+	snap.Pane("%3").LastOutput = time.Now().Unix()
+	m := newModel(Tmux{}, Ais{}, snap, Config{})
+	marked := func() map[string]bool {
+		got := map[string]bool{}
+		for _, r := range m.rows {
+			if strings.Contains(ansi.Strip(m.renderRow(r, false, 80)), "• ") {
+				got[r.Key()] = true
+			}
+		}
+		return got
+	}
+	keys := func(rows []Row, kind RowKind, pane string) string {
+		for _, r := range rows {
+			if r.Kind == kind && (pane == "" || r.Pane != nil && r.Pane.ID == pane) && (kind != RowWindow || r.Pane == nil) {
+				return r.Key()
+			}
+		}
+		t.Fatalf("no row of kind %d for %q", kind, pane)
+		return ""
+	}
+	got := marked()
+	if len(got) != 2 || !got[keys(m.rows, RowPane, "%3")] || !got[keys(m.rows, RowWindow, "")] {
+		t.Fatalf("the busy pane and its window, nothing else: %v", got)
+	}
+	m.collapsed["$1"] = true
+	m.rebuild()
+	got = marked()
+	if len(got) != 1 || !got[m.rows[0].Key()] || m.rows[0].Kind != RowSession {
+		t.Fatalf("a collapsed session stands for its busy pane: %v", got)
 	}
 }
 

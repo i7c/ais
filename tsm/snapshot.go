@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // A Snapshot is everything tmux knows about its sessions, windows and panes at
@@ -62,8 +63,38 @@ type Pane struct {
 	Cwd     string `json:"cwd"`
 	Remote  string `json:"remote,omitempty"` // "tsm attach" runs here, to this remote
 
+	LastOutput int64 `json:"last_output,omitempty"`
+
 	Window *Window `json:"-"`
 	Moved  string  `json:"-"` // staged: where it came from
+}
+
+const activeWithin = 30 * time.Second
+
+func (p *Pane) Busy(now time.Time) bool {
+	at := p.LastOutput
+	if at == 0 && p.Window != nil {
+		at = p.Window.Activity
+	}
+	return at > 0 && now.Sub(time.Unix(at, 0)) < activeWithin
+}
+
+func (w *Window) Busy(now time.Time) bool {
+	for _, p := range w.Panes {
+		if p.Busy(now) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Session) Busy(now time.Time) bool {
+	for _, w := range s.Windows {
+		if w.Busy(now) {
+			return true
+		}
+	}
+	return false
 }
 
 // Dir is where the pane works: the directory ais says its session runs in,
@@ -101,7 +132,7 @@ var paneFields = []string{
 	"pane_current_path", "pane_pid", "pane_title", "pane_dead",
 	"pane_width", "pane_height",
 	"@ais_id", "@ais_profile", "@ais_desc", "@cwd", "@tsm_remote",
-	"window_bell_flag",
+	"window_bell_flag", "pane_last_output_time",
 }
 
 var clientFields = []string{"client_name", "session_id", "pane_id", "base-index"}
@@ -166,12 +197,13 @@ func ParseSnapshot(out string) *Snapshot {
 			windows[f[3]] = w
 			s.Windows = append(s.Windows, w)
 		}
+		lastOutput, _ := strconv.ParseInt(f[25], 10, 64)
 		w.Panes = append(w.Panes, &Pane{
 			ID: f[9], Index: atoi(f[10]), Active: f[11] == "1", Command: f[12],
 			Path: f[13], PID: atoi(f[14]), Title: f[15], Dead: f[16] == "1",
 			Width: atoi(f[17]), Height: atoi(f[18]),
 			AisID: f[19], Profile: f[20], Desc: f[21], Cwd: f[22], Remote: f[23],
-			Window: w,
+			LastOutput: lastOutput, Window: w,
 		})
 	}
 	return snap

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"fmt"
 	"strings"
 	"time"
@@ -411,6 +412,9 @@ func (m *model) renderRow(r Row, selected bool, w int) string {
 		right = st(profileColor(r.Ais.Profile)).Render(r.Ais.Profile) + st(cDim).Render(fmt.Sprintf(" %4s", ago))
 	}
 
+	if m.busy(r, time.Now()) {
+		right = st(cOK).Render("• ") + right
+	}
 	if moved != "" {
 		left += st(cOK).Render(" ← " + moved)
 	}
@@ -419,6 +423,18 @@ func (m *model) renderRow(r Row, selected bool, w int) string {
 	left = ansi.Truncate(left, max(0, room), "…")
 	gap := w - ansi.StringWidth(head) - ansi.StringWidth(left) - ansi.StringWidth(right) - 1
 	return head + left + base.Render(strings.Repeat(" ", max(1, gap))) + right + base.Render(" ") + "\x1b[0m"
+}
+
+func (m *model) busy(r Row, now time.Time) bool {
+	switch {
+	case r.Kind == RowSession:
+		return m.collapsed[collapseKey(r.Host, r.Session)] && m.filter.Value() == "" && r.Session.Busy(now)
+	case r.Kind != RowWindow && r.Kind != RowPane:
+		return false
+	case r.Pane != nil:
+		return r.Pane.Busy(now)
+	}
+	return r.Window.Busy(now)
 }
 
 // formAis is how the form shows ais: this host's, or just "ais" on a
@@ -577,8 +593,8 @@ func (m *model) preview(w, h int) []string {
 		field("dir", tilde(p.Dir()))
 		gitLine(p.Dir())
 		lines = append(lines, label("at")+text(p.Location())+fg(cDim).Render(fmt.Sprintf("  %s  %dx%d", p.ID, p.Width, p.Height)))
-		if p.Window.Activity > 0 {
-			field("active", ageStr(now.Sub(time.Unix(p.Window.Activity, 0)))+" ago")
+		if at := cmp.Or(p.LastOutput, p.Window.Activity); at > 0 {
+			field("active", ageStr(now.Sub(time.Unix(at, 0)))+" ago")
 		}
 		if p.Window.Bell {
 			lines = append(lines, fg(cWant).Render("● ")+fg(cMuted).Render("rang the bell"))
