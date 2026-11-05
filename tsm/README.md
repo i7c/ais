@@ -287,8 +287,12 @@ dropped network. Banners on a Mac cannot be clicked through to the pane:
 `osascript` notifications do not report clicks.
 
 A new shell beside an ais pane starts in the session's directory — its
-worktree — with its profile's env and `$AIS_WORKTREE`/`$AIS_WORKTREE_BASE`
-(from `ais env`), but not `$AIS_SESSION`: the shell is not the agent.
+worktree — inside the session, as `ais env` describes it: its profile's env,
+`$AIS_SESSION` and the rest of the session's variables, and
+`$AIS_WORKTREE`/`$AIS_WORKTREE_BASE`, so `ais name` and `ais wt` answer for
+the session there. `$AIS_SIBLING=1` marks it as not the agent: a harness
+started from it does not report its conversation as the session's, and
+`ais notify` from it skips the banner by the shell's own pane.
 
 Anything tsm starts in a pane (`ais restart`, `ais run --fork`) is typed into
 a fresh interactive shell rather than run as the pane's command, so it runs as

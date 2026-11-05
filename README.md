@@ -80,7 +80,7 @@ env = { PORT = "8001" }
 | `restart [id]` | Re-run a dead session's harness in this pane, resuming its conversation. Keeps directory, name and worktree, gets a new ais id. `--fresh` for a new conversation. |
 | `wt <cmd>` | This session's worktrees: `add [repo]`, `ls [-a]`, `path [repo]`, `prune`. |
 | `state` | Every profile and session as JSON — the API other programs (tsm) read. `--active`, `--since <notification id>`. |
-| `env <id>` | Where a session runs and the env a shell beside it needs, as shell to `eval` or `--json`. |
+| `env <id>` | Where a session runs and the env a shell beside it needs (`AIS_SESSION` and friends, plus `AIS_SIBLING=1`), as shell to `eval` or `--json`. |
 | `prune [--all]` | Drop dead sessions older than `--days` (default 7), and the finished worktrees of the ones it drops. `--keep-worktrees` to leave those alone. |
 
 ## Worktrees

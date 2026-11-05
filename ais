@@ -58,6 +58,11 @@ NOTIFY_SEEN_AFTER = 3     # seconds on screen before a pane's call counts as see
 # fresh one in the same process), so the ids are a history, newest last.
 SESSION_ID_KEEP = 20
 
+SESSION_ENV = (
+    "AIS_SESSION", "AIS_SIBLING", "AIS_PROFILE", "AIS_HARNESS",
+    "AIS_SESSION_DESCRIPTION", "AIS_WORKTREE", "AIS_WORKTREE_BASE",
+)
+
 # What "ais install" writes into a harness's global instructions — how an agent
 # running inside a session is meant to use ais — between these markers, so a
 # later install replaces its own section and nothing else.
@@ -1016,6 +1021,14 @@ def offer_to_sink(sink: list[str], payload: dict) -> str | None:
     return result if result in ("shown", "suppressed") else None
 
 
+def notify_pane(session: dict | None) -> str | None:
+    """The pane whose being on screen makes a banner pointless."""
+    own = os.environ.get("TMUX_PANE")
+    if os.environ.get("AIS_SIBLING") and own:
+        return own
+    return ((session or {}).get("tmux") or {}).get("pane_id") or own
+
+
 def cmd_notify(args):
     """Raise a desktop notification for this session and remember that it happened.
 
@@ -1036,7 +1049,7 @@ def cmd_notify(args):
 
     # The session's own recorded pane is the one that matters — $TMUX_PANE only
     # answers for the shell that happens to be running this command.
-    pane_id = ((session or {}).get("tmux") or {}).get("pane_id") or os.environ.get("TMUX_PANE")
+    pane_id = notify_pane(session)
     visible = pane_is_visible(pane_id)
     if session and pane_id:
         install_seen_hooks()  # in case a re-sourced tmux.conf took them away
@@ -1542,6 +1555,11 @@ def run_fork(args, config: dict, pane: str, extra: list[str]) -> int:
     return launch(session, argv, settings, dry_run=args.dry_run)
 
 
+def inherited_env() -> dict[str, str]:
+    """This process's env without another session's identity in it."""
+    return {k: v for k, v in os.environ.items() if k not in SESSION_ENV}
+
+
 def session_profile(session: dict) -> str:
     return session.get("profile") or session.get("harness") or ""
 
@@ -1584,7 +1602,7 @@ def launch(session: dict, argv: list[str], settings: dict, dry_run: bool) -> int
         if wanted:
             make_session_worktree(session, wanted, settings["worktree"])
 
-    env = os.environ.copy()
+    env = inherited_env()
     env.update(settings["env"])
     env["AIS_SESSION"] = session["id"]
     env["AIS_PROFILE"] = harness
@@ -1852,7 +1870,7 @@ def session_seen(args) -> int:
         return 0  # nothing to record; not this hook's business to complain
 
     sid = os.environ.get("AIS_SESSION")
-    if not sid:
+    if not sid or os.environ.get("AIS_SIBLING"):
         return 0  # a harness running outside ais
 
     session = next((s for s in read_sessions() if s.get("id") == sid), None)
@@ -2568,11 +2586,19 @@ def sibling_env(session: dict, config: dict) -> dict[str, str]:
     """What a plain shell beside this session needs to be in the same place.
 
     The profile's own env, so whatever it sets up (a venv, a PORT) is there
-    too, and where the session's worktrees are, so "ais wt" style paths line
-    up. Deliberately not AIS_SESSION: a shell beside an agent is not that agent,
-    and anything it notifies or starts should not be filed under it.
+    too, the session's identity, so "ais name" and "ais wt" answer for it, and
+    where its worktrees are. AIS_SIBLING marks the shell as not the agent
+    itself: a harness started from it must not report its conversation as the
+    session's, and "ais notify" from it asks about its own pane.
     """
-    env = dict(harness_settings(config, session_profile(session))["env"])
+    profile = session_profile(session)
+    env = dict(harness_settings(config, profile)["env"])
+    env["AIS_SESSION"] = session["id"]
+    env["AIS_SIBLING"] = "1"
+    env["AIS_PROFILE"] = profile
+    env["AIS_HARNESS"] = profile
+    if session.get("description"):
+        env["AIS_SESSION_DESCRIPTION"] = session["description"]
     wt = session.get("worktree") or {}
     if wt.get("base"):
         env["AIS_WORKTREE_BASE"] = wt["base"]
@@ -3235,8 +3261,8 @@ commands:
                    --active drops dead sessions; --since ID keeps only
                    notifications newer than ID. Versioned by its "api" key.
   env <id>         where a session runs and the env a shell beside it needs:
-                   shell to eval, or --json. Not AIS_SESSION: the shell is not
-                   the agent.
+                   shell to eval, or --json. Includes AIS_SESSION, with
+                   AIS_SIBLING=1 to mark the shell as not the agent.
   wt <cmd>         worktrees for this session, all under one directory:
                      add [repo]   worktree of repo (default: here) at
                                   <base>/<session name>/<repo>; prints the path.

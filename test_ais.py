@@ -20,6 +20,7 @@ import subprocess
 import tempfile
 import tomllib
 import unittest
+from unittest import mock
 import unittest.mock
 from pathlib import Path
 
@@ -1272,11 +1273,20 @@ class Api(unittest.TestCase):
     def test_active_drops_the_dead(self):
         self.assertEqual(self.state(active=True)["sessions"], [])
 
-    def test_env_carries_the_profile_env_and_worktree_but_not_the_session(self):
+    def test_env_carries_the_profile_env_worktree_and_session(self):
         data = self.run_json(ais.cmd_env, id="dead", json=True)
         self.assertEqual(data["env"]["FOO"], "bar")
         self.assertEqual(data["env"]["AIS_WORKTREE"], "/wt/x/repo")
-        self.assertNotIn("AIS_SESSION", data["env"])
+        self.assertEqual(data["env"]["AIS_SESSION"], "dead000001")
+        self.assertEqual(data["env"]["AIS_HARNESS"], "claude")
+        self.assertEqual(data["env"]["AIS_SIBLING"], "1")
+
+    def test_a_harness_started_beside_the_session_does_not_speak_for_it(self):
+        env = {"AIS_SESSION": "dead000001", "AIS_SIBLING": "1"}
+        with mock.patch.dict(os.environ, env):
+            ais.session_seen(argparse.Namespace(id="conv-2", verbose=False))
+        stored = next(s for s in ais.read_sessions() if s["id"] == "dead000001")
+        self.assertEqual(stored["session_ids"], ["conv-1"])
 
     def test_env_as_shell(self):
         out = io.StringIO()
@@ -1413,6 +1423,26 @@ class Sink(unittest.TestCase):
         for script in ("exit 1", "echo '{\"result\":\"maybe\"}'", "echo nonsense"):
             self.assertIsNone(ais.offer_to_sink(self.sink(script), {}), script)
         self.assertIsNone(ais.offer_to_sink(["/no/such/sink"], {}))
+
+
+class SiblingShell(unittest.TestCase):
+    """A shell tsm opens beside a session carries its identity, marked."""
+
+    def test_run_does_not_inherit_another_sessions_identity(self):
+        env = {"AIS_SESSION": "x", "AIS_SIBLING": "1", "AIS_WORKTREE": "/w", "OTHER": "kept"}
+        with mock.patch.dict(os.environ, env):
+            got = ais.inherited_env()
+        self.assertEqual(got["OTHER"], "kept")
+        for key in ais.SESSION_ENV:
+            self.assertNotIn(key, got)
+
+    def test_notify_from_a_sibling_asks_about_its_own_pane(self):
+        session = {"tmux": {"pane_id": "%1"}}
+        with mock.patch.dict(os.environ, {"TMUX_PANE": "%9", "AIS_SIBLING": "1"}):
+            self.assertEqual(ais.notify_pane(session), "%9")
+        with mock.patch.dict(os.environ, {"TMUX_PANE": "%9"}):
+            os.environ.pop("AIS_SIBLING", None)
+            self.assertEqual(ais.notify_pane(session), "%1")
 
 
 class NameOf(unittest.TestCase):
