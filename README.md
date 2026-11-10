@@ -94,7 +94,8 @@ ais -w -d "fix the auth bug" -- claude   # starts in ~/wt/fix-auth-bug/<repo>
 Everything that session makes lands under `~/wt/<session name>/`, one
 subdirectory per repo, all on a branch named after the session — so the
 directory, the branch and `ais name` always agree, and two sessions never share
-a checkout. The agent gets `$AIS_WORKTREE` and `$AIS_WORKTREE_BASE`, and reaches
+a checkout. The agent gets `$AIS_WORKTREE`, `$AIS_WORKTREE_BASE` and
+`$AIS_REPO_MAIN` (the main checkout the worktree branched from), and reaches
 for another repo through `ais wt`:
 
 ```

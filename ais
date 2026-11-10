@@ -61,6 +61,7 @@ SESSION_ID_KEEP = 20
 SESSION_ENV = (
     "AIS_SESSION", "AIS_SIBLING", "AIS_PROFILE", "AIS_HARNESS",
     "AIS_SESSION_DESCRIPTION", "AIS_WORKTREE", "AIS_WORKTREE_BASE",
+    "AIS_REPO_MAIN",
 )
 
 # What "ais install" writes into a harness's global instructions — how an agent
@@ -1361,7 +1362,9 @@ def session_worktree_base(session: dict, settings: dict) -> Path:
     return Path(recorded) if recorded else settings["base"] / session_dirname(session)
 
 
-def record_worktree(sid: str, base: Path, initial: Path | None, branch: str) -> bool:
+def record_worktree(
+    sid: str, base: Path, initial: Path | None, branch: str, root: Path | None = None,
+) -> bool:
     """Remember a session's worktree directory, and its initial worktree if any."""
     def apply(sessions):
         target = next((s for s in sessions if s.get("id") == sid), None)
@@ -1375,6 +1378,8 @@ def record_worktree(sid: str, base: Path, initial: Path | None, branch: str) -> 
         if initial is not None:
             rec["initial"] = str(initial)
             target["cwd"] = str(initial)
+        if root is not None:
+            rec["root"] = str(root)
         target["worktree"] = rec
         return True
 
@@ -1609,11 +1614,7 @@ def launch(session: dict, argv: list[str], settings: dict, dry_run: bool) -> int
     env["AIS_HARNESS"] = harness
     if session.get("description"):
         env["AIS_SESSION_DESCRIPTION"] = session["description"]
-    rec = session.get("worktree") or {}
-    if rec.get("base"):
-        env["AIS_WORKTREE_BASE"] = rec["base"]
-    if rec.get("initial"):
-        env["AIS_WORKTREE"] = rec["initial"]
+    env.update(worktree_env(session))
 
     if dry_run:
         print("session:", session["id"], "(dry run, not recorded)")
@@ -1693,8 +1694,11 @@ def make_session_worktree(session: dict, wanted: dict, wt: dict) -> None:
         finish(session["id"], 1)
         raise
     session["cwd"] = str(dest)
-    session["worktree"] = {"base": str(base), "initial": str(dest), "branch": name}
-    record_worktree(session["id"], base, dest, name)
+    root = Path(wanted["root"])
+    session["worktree"] = {
+        "base": str(base), "initial": str(dest), "branch": name, "root": str(root),
+    }
+    record_worktree(session["id"], base, dest, name, root)
     note(f"working in {tilde(dest)}")
 
 
@@ -2503,7 +2507,7 @@ def public_session(s: dict, config: dict, host: str) -> dict:
         "status": "active" if alive else "dead",
         "host": s.get("hostname"),
         "cwd": cwd,
-        "worktree": {k: wt[k] for k in ("base", "initial", "branch") if wt.get(k)},
+        "worktree": {k: wt[k] for k in ("base", "initial", "branch", "root") if wt.get(k)},
         "tmux": dict(s.get("tmux") or {}),
         "pid": s.get("pid"),
         "started_at": s.get("started_at"),
@@ -2599,11 +2603,21 @@ def sibling_env(session: dict, config: dict) -> dict[str, str]:
     env["AIS_HARNESS"] = profile
     if session.get("description"):
         env["AIS_SESSION_DESCRIPTION"] = session["description"]
-    wt = session.get("worktree") or {}
-    if wt.get("base"):
-        env["AIS_WORKTREE_BASE"] = wt["base"]
-    if wt.get("initial"):
-        env["AIS_WORKTREE"] = wt["initial"]
+    env.update(worktree_env(session))
+    return env
+
+
+def worktree_env(session: dict) -> dict[str, str]:
+    """AIS_WORKTREE_BASE, AIS_WORKTREE and AIS_REPO_MAIN, as far as known."""
+    rec = session.get("worktree") or {}
+    env = {}
+    if rec.get("base"):
+        env["AIS_WORKTREE_BASE"] = rec["base"]
+    if rec.get("initial"):
+        env["AIS_WORKTREE"] = rec["initial"]
+        root = rec.get("root") or repo_root(rec["initial"])
+        if root:
+            env["AIS_REPO_MAIN"] = str(root)
     return env
 
 
@@ -3282,7 +3296,8 @@ worktrees:
   worktree.base in config.toml (~/wt by default, $AIS_WT_BASE overrides) and
   <session name> is "ais name". The branch is that name too, in every repo, so
   the directory, the branch and the session all agree. A session started with
-  -w exports AIS_WORKTREE and AIS_WORKTREE_BASE for the agent to find them.
+  -w exports AIS_WORKTREE, AIS_WORKTREE_BASE and AIS_REPO_MAIN (the main
+  checkout the worktree branched from) for the agent to find them.
 
   auto = true under [worktree] makes that the default: every session gets a
   worktree when you start it inside a repo, and runs where you are when you do

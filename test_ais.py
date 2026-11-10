@@ -989,8 +989,18 @@ class SessionWorktrees(unittest.TestCase):
         self.assertEqual(
             self.stored()["worktree"],
             {"base": str(self.base / "fix-the-thing"), "initial": str(dest),
-             "branch": "fix-the-thing"},
+             "branch": "fix-the-thing", "root": str(self.repo.path)},
         )
+
+    def test_a_shell_beside_a_worktree_session_knows_the_main_checkout(self):
+        session = dict(self.session)
+        ais.make_session_worktree(
+            session, {"root": str(self.repo.path), "repo": "widget"}, self.settings()
+        )
+        self.assertEqual(ais.worktree_env(self.stored())["AIS_REPO_MAIN"], str(self.repo.path))
+        older = dict(self.stored())
+        older["worktree"] = {k: v for k, v in older["worktree"].items() if k != "root"}
+        self.assertEqual(ais.worktree_env(older)["AIS_REPO_MAIN"], str(self.repo.path))
 
     def test_a_session_that_cannot_get_its_worktree_is_closed_off(self):
         (self.base / "fix-the-thing" / "widget").mkdir(parents=True)
@@ -1280,6 +1290,7 @@ class Api(unittest.TestCase):
         self.assertEqual(data["env"]["AIS_SESSION"], "dead000001")
         self.assertEqual(data["env"]["AIS_HARNESS"], "claude")
         self.assertEqual(data["env"]["AIS_SIBLING"], "1")
+        self.assertNotIn("AIS_REPO_MAIN", data["env"])
 
     def test_a_harness_started_beside_the_session_does_not_speak_for_it(self):
         env = {"AIS_SESSION": "dead000001", "AIS_SIBLING": "1"}
