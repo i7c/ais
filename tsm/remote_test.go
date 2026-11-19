@@ -11,6 +11,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 )
 
 func TestSSHNeverPromptsAndSharesOneConnection(t *testing.T) {
@@ -111,6 +112,62 @@ func TestRemotesGetSectionsAndKeysOfTheirOwn(t *testing.T) {
 	}
 	if rows[0].Kind != RowHeader || rows[0].Title != "needs you" {
 		t.Fatal("whoever calls, on any host, comes first")
+	}
+}
+
+func TestEveryHostsEndedSessionsShareTheBottomSection(t *testing.T) {
+	now := time.Now()
+	dead := func(id, label, host, ended string) AisSession {
+		return AisSession{ID: id, Profile: "claude", Description: label, Status: "dead", Host: host, Cwd: "/w/" + id, EndedAt: ended, CanRestart: true}
+	}
+	st := state(now, dead("l1", "local work", "h", "2026-01-02T00:00:00Z"))
+	remote := &Host{Name: "karif", Snap: fixture()}
+	remote.State = state(now, dead("r1", "remote work", "k", "2026-01-01T00:00:00Z"))
+	rows := BuildAll(fixture(), st, []*Host{remote}, TreeOptions{Now: now})
+
+	heading := -1
+	var ended []Row
+	for i, r := range rows {
+		switch {
+		case r.Kind == RowHeader && r.Title == "resumable":
+			if heading >= 0 {
+				t.Fatal("one resumable section, not one per host")
+			}
+			heading = i
+		case r.Kind == RowResumable:
+			ended = append(ended, r)
+		}
+	}
+	if heading < 0 || len(ended) != 2 {
+		t.Fatalf("heading at %d, %d resumables", heading, len(ended))
+	}
+	if heading != len(rows)-3 {
+		t.Fatalf("the section starts at %d, not after every host's tree: %s", heading, kinds(rows))
+	}
+	if rows[heading].Host != nil {
+		t.Fatal("the shared heading belongs to no one host")
+	}
+	if ended[0].Host != nil || ended[0].Ais.ID != "l1" {
+		t.Fatalf("this host's ended session comes first, untagged: %+v", ended[0])
+	}
+	if ended[1].Host == nil || ended[1].Host.Name != "karif" || ended[1].Ais.ID != "r1" {
+		t.Fatalf("a remote's ended session carries its host: %+v", ended[1])
+	}
+
+	m := newModel(Tmux{}, Ais{}, fixture(), Config{})
+	if line := ansi.Strip(m.renderRow(ended[1], false, 80)); !strings.Contains(line, "karif") {
+		t.Fatalf("a remote's line is tagged with its host: %q", line)
+	}
+	if line := ansi.Strip(m.renderRow(ended[0], false, 80)); strings.Contains(line, "karif") {
+		t.Fatalf("this host's line needs no tag: %q", line)
+	}
+
+	// A filter that only an ended session matches must not leave the
+	// host's heading behind with nothing under it.
+	for _, r := range BuildAll(fixture(), st, []*Host{remote}, TreeOptions{Filter: "remote work", Now: now}) {
+		if r.Kind == RowHeader && r.Title == "karif" {
+			t.Fatal("a remote with no matching tree rows gets no heading")
+		}
 	}
 }
 

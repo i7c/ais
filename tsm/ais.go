@@ -20,7 +20,7 @@ type AisState struct {
 	// How long a pane must stay on screen before its call is seen; nil from
 	// an ais too old to mark calls seen at all.
 	NotifySeenAfter *float64 `json:"notify_seen_after"` // seconds
-	Worktree     struct {
+	Worktree        struct {
 		Base string `json:"base"`
 		Auto bool   `json:"auto"`
 		// From and Detach are how ais makes a worktree when nobody says
@@ -95,6 +95,17 @@ func (s *AisSession) LastNotification() *AisNotification {
 		return nil
 	}
 	return &s.Notifications[len(s.Notifications)-1]
+}
+
+// NotifiedRecently is whether the session's last notification is inside the
+// window: it called for you, whether or not you have looked since.
+func (s *AisSession) NotifiedRecently(window float64, now time.Time) bool {
+	n := s.LastNotification()
+	if n == nil {
+		return false
+	}
+	age, ok := since(n.At, now)
+	return ok && age.Minutes() <= window
 }
 
 // WantsYou is true while the session's last word was a call for you, made in
@@ -230,6 +241,30 @@ func (st *AisState) ByPane() map[string]*AisSession {
 		}
 	}
 	return out
+}
+
+// ForPane is the running ais session a pane shows: the one its mark names,
+// else the one ais recorded for it — panes started before ais marked them
+// only have the record.
+func (st *AisState) ForPane(p *Pane) *AisSession {
+	if st == nil || p == nil {
+		return nil
+	}
+	if p.AisID != "" {
+		for i := range st.Sessions {
+			if st.Sessions[i].ID == p.AisID {
+				return &st.Sessions[i]
+			}
+		}
+		return nil
+	}
+	for i := range st.Sessions {
+		s := &st.Sessions[i]
+		if s.Status == "active" && s.Tmux.PaneID == p.ID && s.Host == st.Host {
+			return s
+		}
+	}
+	return nil
 }
 
 // Resumable are the dead sessions worth offering back, newest first: ones

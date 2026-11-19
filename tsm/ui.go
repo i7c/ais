@@ -379,6 +379,67 @@ func (m *model) move(delta int) tea.Cmd {
 	return m.selectionCmds()
 }
 
+// hot is whether a session row is worth jumping to: something in it wrote to
+// its terminal lately, it rang the bell, or an ais session in it was notified
+// within the window — whether or not you have looked since.
+func (m *model) hot(r Row, now time.Time) bool {
+	if r.Kind != RowSession {
+		return false
+	}
+	if r.Session.Busy(now) {
+		return true
+	}
+	for _, w := range r.Session.Windows {
+		if w.Bell {
+			return true
+		}
+	}
+	st := m.stateFor(r)
+	if st == nil {
+		return false
+	}
+	window := 60.0
+	if st.NotifyWindow > 0 {
+		window = st.NotifyWindow
+	}
+	for _, w := range r.Session.Windows {
+		for _, p := range w.Panes {
+			if a := st.ForPane(p); a != nil && a.NotifiedRecently(window, now) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// jumpHot moves to the next (delta 1) or previous (delta -1) active or
+// recently notified session, wrapping around the list. One stop per session,
+// at its row in the tree.
+func (m *model) jumpHot(delta int) tea.Cmd {
+	n := len(m.rows)
+	if n == 0 {
+		return nil
+	}
+	now := time.Now()
+	for step := 1; step <= n; step++ {
+		i := ((m.cursor+delta*step)%n + n) % n
+		if i == m.cursor {
+			break // came back around: this is the only hot session there is
+		}
+		if !m.hot(m.rows[i], now) {
+			continue
+		}
+		m.cursor, m.key = i, m.rows[i].Key()
+		return m.selectionCmds()
+	}
+	if m.hot(m.rows[m.cursor], now) {
+		m.setStatus("no other session is active or was recently notified", false)
+	} else {
+		m.setStatus("no session is active or was recently notified", false)
+	}
+	return nil
+}
+
 func (m *model) askYes(prompt string, yes func() tea.Cmd) {
 	m.mode = modeConfirm
 	m.confirm.prompt, m.confirm.yes = prompt, yes
@@ -647,6 +708,11 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		return m.move(max(1, m.bodyHeight()/2))
 	case "ctrl+u", "pgup":
 		return m.move(-max(1, m.bodyHeight()/2))
+	case "]", "alt+n":
+		// Next session that is doing something or was notified lately.
+		return m.jumpHot(1)
+	case "[", "alt+p":
+		return m.jumpHot(-1)
 	case "tab":
 		// Next session, skipping over its windows.
 		for i := m.cursor + 1; i < len(m.rows); i++ {

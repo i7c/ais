@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -118,6 +119,49 @@ func kinds(rows []Row) string {
 		b = append(b, map[RowKind]string{RowHeader: "H", RowSession: "S", RowWindow: "W", RowPane: "P", RowResumable: "R"}[r.Kind])
 	}
 	return strings.Join(b, "")
+}
+
+func TestJumpBetweenActiveAndRecentlyNotifiedSessions(t *testing.T) {
+	now := time.Now()
+	snap := fixture()
+	snap.Pane("%3").LastOutput = now.Unix() // soi is writing right now
+	notified := AisSession{ID: "bbb", Profile: "weechat", Status: "active", Host: "h",
+		Notifications: []AisNotification{{At: now.Add(-time.Minute).Format(time.RFC3339), Message: "ping"}}}
+	notified.Tmux.PaneID = "%4" // irc was notified a minute ago
+	m := newModel(Tmux{}, Ais{}, snap, Config{})
+	m.Update(stateMsg{st: state(now, notified)})
+
+	session := func(name string) string {
+		for _, r := range m.rows {
+			if r.Kind == RowSession && r.Session.Name == name {
+				return r.Key()
+			}
+		}
+		t.Fatalf("no session row for %s", name)
+		return ""
+	}
+	at := func() string {
+		r, ok := m.selected()
+		if !ok || r.Kind != RowSession {
+			return "" // you start on a pane, not on a session
+		}
+		return r.Key()
+	}
+	if got := at(); got != "" {
+		t.Fatalf("the cursor starts where you are, not on a hot session: %s", got)
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("]")})
+	if got := at(); got != session("irc") {
+		t.Fatalf("next = %s, want irc", got)
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("]")})
+	if got := at(); got != session("soi") {
+		t.Fatalf("next wrapped = %s, want soi", got)
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("p"), Alt: true})
+	if got := at(); got != session("irc") {
+		t.Fatalf("previous = %s, want irc", got)
+	}
 }
 
 func TestOnePaneWindowsAreOneRow(t *testing.T) {

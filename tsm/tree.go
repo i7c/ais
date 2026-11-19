@@ -87,14 +87,16 @@ func BuildRows(snap *Snapshot, st *AisState, opt TreeOptions) []Row {
 }
 
 // BuildAll lays out every host: who wants you, wherever they are, first;
-// then this host's sessions and ended ones; then each remote's, under a
-// heading of its own.
+// then this host's sessions, then each remote's under a heading of its own;
+// then every host's ended sessions together at the bottom, where they are out
+// of the way of what is running. A remote's ended sessions carry a tag naming
+// their host.
 func BuildAll(snap *Snapshot, st *AisState, remotes []*Host, opt TreeOptions) []Row {
 	relayed, quiet := relayedBells(snap, remotes)
 	wants, tree, ended := sections(snap, st, nil, opt, "", quiet)
 	type part struct {
-		host        *Host
-		tree, ended []Row
+		host *Host
+		tree []Row
 	}
 	var parts []part
 	for _, h := range remotes {
@@ -104,7 +106,8 @@ func BuildAll(snap *Snapshot, st *AisState, remotes []*Host, opt TreeOptions) []
 		}
 		w, t, e := sections(h.Snap, h.State, h, opt, relayed[h.Name], nil)
 		wants = append(wants, w...)
-		parts = append(parts, part{h, t, e})
+		ended = append(ended, e...)
+		parts = append(parts, part{h, t})
 	}
 
 	var rows []Row
@@ -113,21 +116,17 @@ func BuildAll(snap *Snapshot, st *AisState, remotes []*Host, opt TreeOptions) []
 		rows = append(rows, wants...)
 	}
 	rows = append(rows, tree...)
-	if len(ended) > 0 {
-		rows = append(rows, Row{Kind: RowHeader, Title: "resumable"})
-		rows = append(rows, ended...)
-	}
 	for _, p := range parts {
-		filtered := opt.Filter != "" && len(p.tree)+len(p.ended) == 0
+		filtered := opt.Filter != "" && len(p.tree) == 0
 		if filtered {
 			continue // nothing there matches; the heading would only be noise
 		}
 		rows = append(rows, Row{Kind: RowHeader, Title: p.host.Name, Host: p.host})
 		rows = append(rows, p.tree...)
-		if len(p.ended) > 0 {
-			rows = append(rows, Row{Kind: RowHeader, Title: "resumable · " + p.host.Name, Host: p.host})
-			rows = append(rows, p.ended...)
-		}
+	}
+	if len(ended) > 0 {
+		rows = append(rows, Row{Kind: RowHeader, Title: "resumable"})
+		rows = append(rows, ended...)
 	}
 	return rows
 }

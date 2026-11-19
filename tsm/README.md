@@ -59,7 +59,9 @@ below), so you navigate from where you are rather than from the top.
 - One row per window when the window is one pane; a window of several lists
   them under it.
 - **resumable** — ais sessions that ended and can be restarted here, the
-  latest run of each piece of work only.
+  latest run of each piece of work only. Every host's ended sessions are
+  listed together at the bottom, so they never split the running ones;
+  a remote's line carries its host's name.
 
 ## Keys
 
@@ -76,6 +78,7 @@ below), so you navigate from where you are rather than from the top.
 | `n` | new: a profile or a shell, somewhere, in a new worktree or not, as a window, split or session (below) |
 | `/` | filter on session, window, command, directory and description; every word must match |
 | `j k` `tab` `h l` `g G` | move, next session, collapse/expand, top/bottom |
+| `]` `[` | next / previous session that is active or was recently notified; `alt+n` / `alt+p` do the same |
 | `?` | help |
 
 ## Making something new
@@ -166,8 +169,9 @@ sessions), which goes once the plan has run.
 
 With tmux on your laptop, and in one of its panes an ssh or mosh connection to
 a server running tmux too, tsm shows both: the server's sessions under a
-heading of their own, its agents among "needs you", and every key working on
-its rows as on local ones.
+heading of their own, its agents among "needs you", its ended sessions in the
+shared "resumable" section at the bottom, and every key working on its rows
+as on local ones.
 
 ```toml
 # ~/.config/tsm/config.toml

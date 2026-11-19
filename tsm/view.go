@@ -236,6 +236,7 @@ func helpLines() []string {
 		k("tab S-tab", "next / previous session"),
 		k("h l ← →", "collapse / expand a session"),
 		k("g G", "top / bottom"),
+		k("] [", "next / previous hot session"),
 		k("/", "filter; esc clears it"),
 		"",
 		h("act on the selection"),
@@ -249,6 +250,9 @@ func helpLines() []string {
 		k("n", "new: profile, directory, worktree, place"),
 		k("m", "move: pick up, drop with p / P / N, ⏎ applies"),
 		k("ctrl-r", "refresh now"),
+		"",
+		fg(cDim).Render("a hot session is one that is active or was"),
+		fg(cDim).Render("notified recently (alt+n / alt+p too)"),
 		"",
 		fg(cDim).Render("a new shell beside an ais pane starts in its"),
 		fg(cDim).Render("worktree, with its profile's env"),
@@ -331,7 +335,7 @@ func (m *model) renderRow(r Row, selected bool, w int) string {
 	case RowHeader:
 		t := " " + strings.ToUpper(r.Title) + " "
 		status := ""
-		if r.Host != nil && !strings.HasPrefix(r.Title, "resumable") {
+		if r.Host != nil {
 			status = m.hostStatus(r.Host)
 		}
 		titleStyle := lipgloss.NewStyle().Bold(true).Foreground(cMuted)
@@ -410,6 +414,11 @@ func (m *model) renderRow(r Row, selected bool, w int) string {
 			ago = ageStr(d)
 		}
 		right = st(profileColor(r.Ais.Profile)).Render(r.Ais.Profile) + st(cDim).Render(fmt.Sprintf(" %4s", ago))
+		if r.Host != nil {
+			// All hosts' ended sessions share one section; this says which
+			// host a line comes from. Untagged lines are from this one.
+			right = st(cRemote).Render(r.Host.Name) + st(cDim).Render(" · ") + right
+		}
 	}
 
 	if m.busy(r, time.Now()) {
