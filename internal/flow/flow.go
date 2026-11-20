@@ -31,6 +31,12 @@ Planned and dispatched sessions: see docs/flow-proposal.md.
                                raise or lower wip, per_hour or per_day for a
                                while (default: until the end of the day)
   limit --clear [KEY]          drop overrides
+  dispatch [--dry-run]         start queued sessions while the limits allow
+                               (what the timer runs every five minutes)
+  dispatch --now ID            start one now, past the limits and its "after"
+  done [ID]                    the session's work is finished: frees its slot.
+                               ID is a proposal or session; default: this one
+  install [-n] [--no-enable]   write and enable the systemd user timer
   ls                           workspaces: planner, queue, running, limits used
   log [-n N]                   what flow did, newest first
 
@@ -48,6 +54,13 @@ var stdout io.Writer = os.Stdout
 
 // Main runs "ais flow" with args (after "flow") and returns the exit code.
 func Main(args []string) int {
+	if len(args) > 0 && args[0] == "start" {
+		code, err := cmdStart(args[1:])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "ais flow: %s\n", err)
+		}
+		return code
+	}
 	err := run(args)
 	if err == nil {
 		return 0
@@ -87,6 +100,12 @@ func run(args []string) error {
 			return cmdQueueCancel(rest)
 		}
 		return usagef("unknown queue command %q; try add, ls, show, edit, cancel", sub)
+	case "dispatch":
+		return cmdDispatch(rest)
+	case "done":
+		return cmdDone(rest)
+	case "install":
+		return cmdInstall(rest)
 	case "limit", "limits":
 		return cmdLimit(rest)
 	case "ls", "status":

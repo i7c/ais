@@ -2,7 +2,8 @@
 """A stand-in gh for the acceptance suite: one Projects (v2) board in a file.
 
 State lives in $FAKE_LOG/gh/: project.json ({"items": [...]} as gh prints it),
-comments.json (what "gh issue comment" was asked to post), calls.log (every
+comments.json (what "gh issue comment" was asked to post), closed (issue
+URLs "gh issue view" reports as closed), calls.log (every
 call), and an optional "fail" file naming a subcommand ("item-edit",
 "item-list", "comment") that should fail.
 """
@@ -50,6 +51,10 @@ elif args[:2] == ["project", "item-edit"]:
     else:
         sys.exit("no such item " + str(opt("--id")))
     json.dump(data, open(board, "w"))
+elif args[:2] == ["issue", "view"]:
+    path = os.path.join(root, "closed")
+    closed = open(path).read().split() if os.path.exists(path) else []
+    print(json.dumps({"state": "CLOSED" if args[2] in closed else "OPEN"}))
 elif args[:2] == ["issue", "comment"]:
     if fail == "comment":
         sys.exit("HTTP 502: fake failure")

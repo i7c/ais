@@ -80,7 +80,9 @@ type Session struct {
 	CanFork      bool     `json:"can_fork"`
 	// LastInputAt is when you last sent the harness a prompt (not counting
 	// the first one ais gave it); empty until you have.
-	LastInputAt   string         `json:"last_input_at"`
+	LastInputAt string `json:"last_input_at"`
+	// FlowProposal is the "ais flow" proposal the session was started for.
+	FlowProposal  string         `json:"flow_proposal,omitempty"`
 	Notifications []Notification `json:"notifications"`
 }
 

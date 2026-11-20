@@ -1,6 +1,6 @@
 # Proposal: `ais flow` — planned, dispatched agent sessions
 
-Status: **agreed; steps 0–5 done** (2026-11-20)
+Status: **agreed; steps 0–6 done** (2026-11-20)
 
 ## 1. What this is for
 
@@ -515,11 +515,19 @@ Each step is one or two commits and usable on its own.
      `limit`, `ls` and `log`.
    - **Tests:** black-box against a fake `gh` board, and read-only against
      gpwsoi/3.
-6. **Dispatcher.**
-   - `dispatch`, `start`, `done`, `dispatch --now`, the limits and
-     overrides, reconcile.
-   - `ais flow install` for the dispatch timer.
-   - Acceptance tests against a scratch GitHub project.
+6. **Dispatcher.** Done 2026-11-20.
+   - **Starting sessions:** `ais flow dispatch` runs from a systemd timer
+     every five minutes, and `--now ID` starts one by hand. It opens a
+     window in the workspace's tmux session and types
+     `ais flow start <id>`. That runs `ais run --prompt … --repos …`
+     in-process, with `AIS_FLOW_PROPOSAL`, so the session records its
+     proposal. A restart keeps the proposal; a fork doesn't.
+   - **Done:** `ais flow done`.
+   - **Reconcile:** a proposal still "starting" after 2 minutes goes back
+     to the queue.
+   - **Trust:** claude isn't started under a worktree base it doesn't
+     trust.
+   - **Install:** `ais flow install` writes and enables the timer.
 7. **Planner.**
    - `ais flow plan` with the singleton and idle expiry.
    - The plan timer.

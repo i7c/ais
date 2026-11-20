@@ -1,6 +1,8 @@
 package flow
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -116,5 +118,52 @@ func TestConfigDefaults(t *testing.T) {
 	}
 	if _, err := c.workspace(""); err != nil {
 		t.Errorf("a lone workspace is not the default: %v", err)
+	}
+}
+
+// A proposal typed into its pane whose session never came is queued again.
+func TestReconcileRequeuesAStuckStart(t *testing.T) {
+	dir := t.TempDir()
+	saved := homeDir
+	homeDir = func() string { return dir }
+	defer func() { homeDir = saved }()
+	clock := time.Date(2026, 11, 20, 10, 0, 0, 0, time.UTC)
+	now = func() time.Time { return clock }
+	defer func() { now = time.Now }()
+	db, err := openDB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ins := `INSERT INTO proposals (id, workspace, title, tickets, repos, profile, prompt, state, created_at, started_at)
+		VALUES (?, 'soi', 't', '[]', '[]', 'claude', 'p', 'starting', ?, ?)`
+	db.Exec(ins, "pstuck1", stamp(clock), stamp(clock.Add(-3*time.Minute)))
+	db.Exec(ins, "pfresh1", stamp(clock), stamp(clock.Add(-30*time.Second)))
+	d := &dispatcher{cfg: &Config{Workspaces: map[string]*Workspace{}}, db: db}
+	if err := d.reconcile(); err != nil {
+		t.Fatal(err)
+	}
+	for id, want := range map[string]string{"pstuck1": "queued", "pfresh1": "starting"} {
+		var state string
+		db.QueryRow(`SELECT state FROM proposals WHERE id = ?`, id).Scan(&state)
+		if state != want {
+			t.Errorf("%s is %s, want %s", id, state, want)
+		}
+	}
+}
+
+func TestClaudeTrusts(t *testing.T) {
+	h := t.TempDir()
+	t.Setenv("HOME", h)
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	if claudeTrusts("/home/x/wt") {
+		t.Error("trusted without a .claude.json")
+	}
+	os.WriteFile(filepath.Join(h, ".claude.json"), []byte(`{"projects": {"/home/x/wt": {"hasTrustDialogAccepted": true},
+		"/home/x/other": {"hasTrustDialogAccepted": false}}}`), 0o644)
+	for path, want := range map[string]bool{"/home/x/wt": true, "/home/x/wt/a/b": true, "/home/x/other": false, "/home/x": false} {
+		if got := claudeTrusts(path); got != want {
+			t.Errorf("claudeTrusts(%s) = %v, want %v", path, got, want)
+		}
 	}
 }

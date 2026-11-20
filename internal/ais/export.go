@@ -1,6 +1,10 @@
 package ais
 
-import "errors"
+import (
+	"errors"
+
+	"github.com/i7c/ais/internal/api"
+)
 
 // What internal/flow needs from ais. ais itself reports problems by dying;
 // these wrap that into ordinary errors, so flow can say what it was doing.
@@ -29,6 +33,47 @@ func RepoRoot(path string) string { return repoRoot(path) }
 
 // Slug is the name ais gives a session described as text.
 func Slug(text string) string { return slugify(text) }
+
+// Sessions is every session as "ais state" shows it, reaped first.
+func Sessions() (out []api.Session, err error) {
+	err = catch(func() {
+		cfg := loadConfig()
+		host := hostname()
+		for _, r := range reapedSessions() {
+			out = append(out, publicSession(r, cfg, host))
+		}
+	})
+	return
+}
+
+// SessionForProposal is the id of the session started for a flow proposal,
+// or "" while there is none; a plain read, cheap enough to poll.
+func SessionForProposal(proposal string) string {
+	id := ""
+	catch(func() {
+		for _, r := range readSessions() {
+			if r.FlowProposal == proposal {
+				id = r.ID
+			}
+		}
+	})
+	return id
+}
+
+// ProfileCommand is the command a profile runs.
+func ProfileCommand(cfg map[string]any, profile string) (cmd []string, err error) {
+	err = catch(func() { cmd = harnessSettings(config(cfg), profile).Command })
+	return
+}
+
+// WorktreeBase is where session directories go.
+func WorktreeBase(cfg map[string]any) (base string, err error) {
+	err = catch(func() { base = worktreeSettings(config(cfg)).Base })
+	return
+}
+
+// Self is the path of the running ais binary, links resolved.
+func Self() string { return self() }
 
 func catch(fn func()) (err error) {
 	defer func() {

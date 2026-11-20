@@ -2,6 +2,8 @@ package flow
 
 import (
 	"fmt"
+
+	"github.com/i7c/ais/internal/ais"
 	"sort"
 	"strconv"
 	"text/tabwriter"
@@ -114,7 +116,39 @@ func cmdLs(args []string) error {
 	}
 	fmt.Fprintf(stdout, "\nrunning %d/%d   started in the last hour %d/%d, last 24h %d/%d\n",
 		all.Running, limits.WIP, hour, limits.PerHour, day, limits.PerDay)
-	return nil
+	return listRunning(db)
+}
+
+// listRunning shows what holds a slot, and whether its session still runs:
+// a session that ended without "ais flow done" still holds one.
+func listRunning(db *DB) error {
+	running, err := proposals(db, `state IN ('starting', 'running')`)
+	if err != nil || len(running) == 0 {
+		return err
+	}
+	status := map[string]string{} // proposal -> its newest session's status
+	session := map[string]string{}
+	if sessions, err := ais.Sessions(); err == nil {
+		for _, s := range sessions { // newest first
+			if s.FlowProposal != "" && session[s.FlowProposal] == "" {
+				session[s.FlowProposal], status[s.FlowProposal] = s.ID, s.Status
+			}
+		}
+	}
+	fmt.Fprintln(stdout)
+	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "RUNNING	WS	TITLE	SESSION	SINCE")
+	for _, p := range running {
+		s := orDefault(session[p.ID], "-")
+		switch {
+		case p.State == "starting":
+			s = "starting"
+		case status[p.ID] == "dead":
+			s += " (ended; ais flow done " + p.ID + " frees the slot)"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", p.ID, p.Workspace, elide(p.Title, 40), s, ago(p.StartedAt))
+	}
+	return tw.Flush()
 }
 
 func ago(s string) string {

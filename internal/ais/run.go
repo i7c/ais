@@ -151,6 +151,10 @@ func cmdRun(a runArgs, harnessArgv []string) int {
 		Tmux:          location,
 		StartedAt:     nowISO(),
 		InitialPrompt: prompt,
+		// Set by "ais flow start", and kept out of the harness's env (see
+		// sessionEnv), so a session the agent starts itself is not taken for
+		// the proposal's.
+		FlowProposal: os.Getenv("AIS_FLOW_PROPOSAL"),
 	}
 	want := many
 	if root != "" {
@@ -273,7 +277,7 @@ func inheritedEnv() map[string]string {
 var sessionEnv = []string{
 	"AIS_SESSION", "AIS_SIBLING", "AIS_PROFILE", "AIS_HARNESS",
 	"AIS_SESSION_DESCRIPTION", "AIS_WORKTREE", "AIS_WORKTREE_BASE",
-	"AIS_REPO_MAIN",
+	"AIS_REPO_MAIN", "AIS_FLOW_PROPOSAL",
 }
 
 // pickSession is the one session whose id starts with wanted.
@@ -676,11 +680,14 @@ func cmdRestart(id string, fresh, dryRun bool) int {
 		HarnessArgs: &harnessArgs,
 		SessionIDs:  ids,
 		RestartOf:   target.ID,
-		Status:      "active",
-		Hostname:    host,
-		Cwd:         target.Cwd,
-		Tmux:        location,
-		StartedAt:   nowISO(),
+		// A restart goes on with the same piece of work, flow proposal
+		// included; a fork is a second agent, and does not.
+		FlowProposal: target.FlowProposal,
+		Status:       "active",
+		Hostname:     host,
+		Cwd:          target.Cwd,
+		Tmux:         location,
+		StartedAt:    nowISO(),
 	}
 	what := "fresh conversation"
 	if len(ids) == 1 && ids[0] == conversation {
