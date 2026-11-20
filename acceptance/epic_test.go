@@ -28,8 +28,21 @@ func (l *Lab) Close(urls ...string) {
 	l.WriteFile(path, text+strings.Join(urls, "\n")+"\n")
 }
 
+func (l *Lab) BlockedBy(issue string, blockers ...string) {
+	l.t.Helper()
+	path := filepath.Join(l.Log, "gh", "blockedby.json")
+	all := map[string][]string{}
+	if fileExists(path) {
+		must(l.t, json.Unmarshal([]byte(l.ReadFile(path)), &all))
+	}
+	all[issue] = blockers
+	b, _ := json.Marshal(all)
+	l.WriteFile(path, string(b))
+}
+
 type readyTicket struct {
 	URL       string        `json:"url"`
+	BlockedBy []string      `json:"blocked_by"`
 	State     string        `json:"state"`
 	Status    string        `json:"status"`
 	HeldBy    string        `json:"held_by"`
@@ -139,5 +152,33 @@ func TestFlowPlanTriggers(t *testing.T) {
 	}
 	if id := strings.TrimSpace(l.MustFlow("plan", "soi").Stdout); !strings.HasPrefix(id, "n") {
 		t.Errorf("plan by hand did not start a planner")
+	}
+}
+
+// A sub-issue blocked by an open issue is not plannable — even while its
+// blocker is queued or running — and becomes plannable once it is closed.
+func TestFlowBlockedSubIssue(t *testing.T) {
+	l := flowLab(t)
+	epic, pool, move := ghURL("gpwsoi/org", 103), ghURL("gpwsoi/org", 109), ghURL("gpwsoi/org", 110)
+	l.Board(issue("gpwsoi/org", 103, "ready"), issue("gpwsoi/org", 109, "Todo"), issue("gpwsoi/org", 110, "Todo"))
+	l.SubIssues(epic, pool, move)
+	l.BlockedBy(move, pool)
+
+	e := find(l.Ready(), epic)
+	if strings.Join(e.Work, " ") != pool || e.SubIssues[1].Plannable || len(e.SubIssues[1].BlockedBy) != 1 {
+		t.Fatalf("epic = %+v; want only #109 plannable, #110 blocked by it", e)
+	}
+	if txt := l.MustFlow("ready").Stdout; !strings.Contains(txt, "blocked by gpwsoi/org#109") {
+		t.Errorf("ready text lacks the blocker:\n%s", txt)
+	}
+
+	// Queued, the blocker still blocks: its work is not in yet.
+	l.queueAdd("--title", "The pool", "--tickets", pool, "--repos", "backend")
+	if e := find(l.Ready(), epic); len(e.Work) != 0 {
+		t.Errorf("with #109 queued, work = %v, want none", e.Work)
+	}
+	l.Close(pool)
+	if e := find(l.Ready(), epic); strings.Join(e.Work, " ") != move {
+		t.Errorf("with #109 closed, work = %v, want #110", e.Work)
 	}
 }

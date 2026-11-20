@@ -12,16 +12,20 @@ import (
 // An epic stays ready while it has open sub-issues: sessions take its
 // sub-issues, and the epic itself only once they are all closed, to finish it.
 type Ticket struct {
-	URL       string   `json:"url"`
-	Title     string   `json:"title"`
-	State     string   `json:"state"`  // OPEN or CLOSED
-	Status    string   `json:"status"` // on the board; "" when not on it
-	HeldBy    string   `json:"held_by,omitempty"`
+	URL    string `json:"url"`
+	Title  string `json:"title"`
+	State  string `json:"state"`  // OPEN or CLOSED
+	Status string `json:"status"` // on the board; "" when not on it
+	HeldBy string `json:"held_by,omitempty"`
+	// BlockedBy is the open issues GitHub records as blocking this one; it
+	// is not plannable until they are closed (merely queued or running is
+	// not enough: their work is not in yet).
+	BlockedBy []string `json:"blocked_by,omitempty"`
 	SubIssues []Ticket `json:"sub_issues,omitempty"`
 	OpenSubs  int      `json:"open_sub_issues"`
 	// Plannable: a session could be proposed for it now — an open ticket no
-	// proposal holds, not already scheduled or in progress on the board, and
-	// with no open sub-issues of its own.
+	// proposal holds, not already scheduled or in progress on the board, not
+	// blocked by an open issue, and with no open sub-issues of its own.
 	Plannable bool `json:"plannable"`
 	// Work is the plannable tickets under (and including) this one: what a
 	// planner can propose sessions for.
@@ -37,23 +41,39 @@ type subIssueNode struct {
 	State string `json:"state"`
 }
 
-// subIssuesOf asks GitHub for an issue's sub-issues and whether it is open;
-// a variable for tests.
-var subIssuesOf = func(url string) (string, []subIssueNode, error) {
-	out, err := ghRunner("issue", "view", url, "--json", "state,subIssues")
+// issueInfo is what GitHub says about one issue beyond the board: open or
+// closed, its sub-issues, and the open issues blocking it.
+type issueInfo struct {
+	State     string
+	SubIssues []subIssueNode
+	Blockers  []string // open ones only
+}
+
+// issueInfoOf asks GitHub; a variable for tests.
+var issueInfoOf = func(url string) (issueInfo, error) {
+	out, err := ghRunner("issue", "view", url, "--json", "state,subIssues,blockedBy")
 	if err != nil {
-		return "", nil, err
+		return issueInfo{}, err
 	}
 	var data struct {
 		State     string `json:"state"`
 		SubIssues struct {
 			Nodes []subIssueNode `json:"nodes"`
 		} `json:"subIssues"`
+		BlockedBy struct {
+			Nodes []subIssueNode `json:"nodes"`
+		} `json:"blockedBy"`
 	}
 	if err := json.Unmarshal(out, &data); err != nil {
-		return "", nil, fmt.Errorf("gh issue view %s: %w", url, err)
+		return issueInfo{}, fmt.Errorf("gh issue view %s: %w", url, err)
 	}
-	return data.State, data.SubIssues.Nodes, nil
+	info := issueInfo{State: data.State, SubIssues: data.SubIssues.Nodes}
+	for _, b := range data.BlockedBy.Nodes {
+		if b.State == "OPEN" {
+			info.Blockers = append(info.Blockers, b.URL)
+		}
+	}
+	return info, nil
 }
 
 // workSet is the board and the queue, read once, for building Tickets.
@@ -93,15 +113,16 @@ func (ws *workSet) ticket(url, title, state string, depth int) (Ticket, error) {
 			t.Title = it.Title
 		}
 	}
+	info, err := issueInfoOf(url)
+	if err != nil {
+		return t, err
+	}
+	if t.State == "" {
+		t.State = info.State
+	}
+	t.BlockedBy = info.Blockers
 	if depth < maxDepth {
-		st, subs, err := subIssuesOf(url)
-		if err != nil {
-			return t, err
-		}
-		if t.State == "" {
-			t.State = st
-		}
-		for _, n := range subs {
+		for _, n := range info.SubIssues {
 			sub, err := ws.ticket(n.URL, n.Title, n.State, depth+1)
 			if err != nil {
 				return t, err
@@ -114,7 +135,7 @@ func (ws *workSet) ticket(url, title, state string, depth int) (Ticket, error) {
 		}
 	}
 	busy := t.Status == ws.w.Source.Scheduled || t.Status == ws.w.Source.InProgress
-	t.Plannable = t.State == "OPEN" && t.HeldBy == "" && !busy && t.OpenSubs == 0
+	t.Plannable = t.State == "OPEN" && t.HeldBy == "" && !busy && t.OpenSubs == 0 && len(t.BlockedBy) == 0
 	if t.Plannable {
 		t.Work = append(t.Work, url)
 	}
@@ -168,12 +189,12 @@ func plannable(ts []Ticket) int {
 // openSubIssues is how many open sub-issues a ticket has: an epic with any
 // cannot be queued itself.
 func openSubIssues(url string) (int, error) {
-	_, subs, err := subIssuesOf(url)
+	info, err := issueInfoOf(url)
 	if err != nil {
 		return 0, err
 	}
 	n := 0
-	for _, s := range subs {
+	for _, s := range info.SubIssues {
 		if s.State == "OPEN" {
 			n++
 		}

@@ -592,6 +592,8 @@ func cmdReady(args []string) error {
 			what = fmt.Sprintf("epic: %d sub-issue(s) open, %d plannable", t.OpenSubs, len(t.Work))
 		case t.HeldBy != "":
 			what = "held by " + t.HeldBy
+		case len(t.BlockedBy) > 0:
+			what = "blocked by " + shortTickets(t.BlockedBy)
 		case !t.Plannable:
 			what = orDefault(t.Status, t.State)
 		case len(t.SubIssues) > 0:
@@ -617,6 +619,8 @@ func printSub(tw *tabwriter.Writer, t Ticket, indent string) {
 		what = fmt.Sprintf("%d sub-issue(s) open", t.OpenSubs)
 	case t.HeldBy != "":
 		what = "held by " + t.HeldBy
+	case len(t.BlockedBy) > 0:
+		what = "blocked by " + shortTickets(t.BlockedBy)
 	case !t.Plannable:
 		what = t.Status
 	}

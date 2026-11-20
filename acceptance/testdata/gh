@@ -4,7 +4,7 @@
 State lives in $FAKE_LOG/gh/: project.json ({"items": [...]} as gh prints it),
 comments.json (what "gh issue comment" was asked to post), closed (issue
 URLs "gh issue view" reports as closed), subissues.json ({issue URL: [its
-sub-issue URLs]}), calls.log (every
+sub-issue URLs]}), blockedby.json ({issue URL: [URLs blocking it]}), calls.log (every
 call), and an optional "fail" file naming a subcommand ("item-edit",
 "item-list", "comment") that should fail.
 """
@@ -59,7 +59,11 @@ elif args[:2] == ["issue", "view"]:
     subs = json.load(open(subs_path)) if os.path.exists(subs_path) else {}
     state = lambda u: "CLOSED" if u in closed else "OPEN"
     nodes = [{"url": u, "title": "sub " + u.rsplit("/", 1)[-1], "state": state(u)} for u in subs.get(args[2], [])]
-    print(json.dumps({"state": state(args[2]), "subIssues": {"nodes": nodes, "totalCount": len(nodes)}}))
+    blk_path = os.path.join(root, "blockedby.json")
+    blk = json.load(open(blk_path)) if os.path.exists(blk_path) else {}
+    blockers = [{"url": u, "title": "blocker", "state": state(u)} for u in blk.get(args[2], [])]
+    print(json.dumps({"state": state(args[2]), "subIssues": {"nodes": nodes, "totalCount": len(nodes)},
+                      "blockedBy": {"nodes": blockers, "totalCount": len(blockers)}}))
 elif args[:2] == ["issue", "comment"]:
     if fail == "comment":
         sys.exit("HTTP 502: fake failure")
