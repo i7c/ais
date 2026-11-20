@@ -117,7 +117,7 @@ base = "~/wt"
 copy = [".env", ".claude/settings.local.json"]   # untracked files a checkout needs
 fetch = true
 auto = false                                     # -w by default, where it applies
-from = "auto"                                    # auto | origin | local | head
+from = "auto"                                    # auto | origin | local | head | Git ref
 detach = false                                   # true: the commit, no branch
 ```
 
@@ -142,8 +142,46 @@ for one run (`ais -w --from head -- claude`, `ais wt add --from local ~/git/x`):
 merged into but have not pushed. When the two have diverged it takes `origin`
 and says so. Whichever it picks, ais prints the ref and commit
 (`new branch foo from origin/main @ ccbc36a`), and a fetch that fails is
-reported rather than silently leaving `origin/*` where it was. A branch of the
-session's name that already exists is reused as it is, whatever `from` says.
+reported rather than silently leaving `origin/*` where it was. With these four
+modes, a branch of the session's name that already exists is reused as it is.
+
+### Starting from an explicit ref
+
+`--from` also accepts a Git ref or single commit-ish: a branch, tag, SHA, or
+revision such as `HEAD~2`. For example:
+
+```sh
+ais run pi -w --from origin/foo-bar --fetch -d "extend foo-bar"
+ais wt add --from upstream/feature --fetch ~/git/other-repo
+ais run pi -w --from v2.4.0 --no-fetch
+ais run pi -w --from refs/heads/head --no-fetch   # a branch literally named head
+```
+
+The first command fetches `origin`'s `foo-bar` branch and creates a **new
+session-named branch** from its resolved commit. It does not check out or modify
+`foo-bar`, and the new branch does not automatically track the source branch.
+Remote-qualified refs use that remote, even when it is not the default, and
+refresh the requested branch even with a narrow fetch refspec. Other refs use
+the repo's normal remote-fetch policy. Resolution happens in the main checkout
+(the same context as the `head` mode), and the resolved SHA is pinned before
+creation.
+
+Explicit refs are strict: missing or ambiguous names, non-commit objects and
+ranges fail rather than falling back to `HEAD`. An enabled fetch that fails is
+fatal, not a warning. `--fetch` / `--no-fetch` override `worktree.fetch` for that
+invocation; `--no-fetch` deliberately uses locally available refs. `--from`
+still does not imply `-w`.
+
+An existing destination worktree is reused unchanged, with a note that the
+starting ref was not applied. If the destination is absent but a local branch
+of the session's name already exists, an explicit ref fails rather than
+ignoring the requested base or resetting existing work. A same-named remote
+session branch does not override an explicit ref.
+
+`worktree.from` may also contain an explicit ref, but that default applies to
+every repository. Per-invocation overrides are usually safer. Restart keeps
+using the existing worktree without fetching or selecting a base; `wt add`
+uses its own flags/configuration, not the initial run's starting override.
 
 `detach = true` (or `--detach`) makes the worktree on that commit with no branch
 at all. Commits made there are only reachable from the worktree, so `ais prune`

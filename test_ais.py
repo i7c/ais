@@ -638,10 +638,17 @@ class WorktreeSettings(unittest.TestCase):
         self.assertEqual((got["from"], got["detach"]), ("origin", True))
         self.assertEqual(conf["from"], "local")  # the settings themselves untouched
 
+    def test_refs_and_fetch_overrides_are_supported(self):
+        conf = ais.worktree_settings({"worktree": {"from": "origin/foo-bar", "fetch": False}})
+        self.assertEqual(conf["from"], "origin/foo-bar")
+        self.assertTrue(ais.with_overrides(conf, None, None, True)["fetch"])
+        self.assertFalse(conf["fetch"])
+
     def test_nonsense_is_refused(self):
         for table in (
             {"base": 7}, {"copy": [1]}, {"fetch": "yes"}, {"auto": "yes"},
-            {"from": "upstream"}, {"detach": "yes"},
+            {"from": 7}, {"from": ""}, {"from": "--help"}, {"from": "HEAD\n"},
+            {"detach": "yes"},
         ):
             with self.assertRaises(SystemExit):
                 ais.worktree_settings({"worktree": table})
@@ -826,6 +833,151 @@ class WorktreeStart(unittest.TestCase):
         self.assertEqual(at, self.sha(self.repo.path, "main"))
         self.assertTrue(any("could not fetch origin" in n for n in self.notes))
 
+    def push_branch_elsewhere(self, msg, branch="foo-bar"):
+        writer = self.root / "branch-writer"
+        if not writer.exists():
+            subprocess.run(["git", "clone", "--quiet", str(self.repo.origin), str(writer)], check=True)
+            for key, value in (("user.email", "t@example.com"), ("user.name", "Test")):
+                subprocess.run(["git", "-C", str(writer), "config", key, value], check=True)
+        sha = self.commit(msg, writer)
+        subprocess.run(["git", "-C", str(writer), "push", "--quiet", "origin",
+                        f"HEAD:refs/heads/{branch}"], check=True)
+        return sha
+
+    def test_explicit_remote_branch_is_fetched_then_used_without_tracking(self):
+        self.push_branch_elsewhere("first feature")
+        self.repo.git("fetch", "origin")
+        fresh = self.push_branch_elsewhere("new feature")
+        self.repo.git("config", "branch.autoSetupMerge", "always")
+        dest, at = self.make(**{"from": "origin/foo-bar"})
+        self.assertEqual(at, fresh)
+        self.assertEqual(ais.worktree_branch(dest), "s")
+        tracked = subprocess.run(["git", "-C", str(dest), "rev-parse", "@{upstream}"],
+                                 capture_output=True)
+        self.assertNotEqual(tracked.returncode, 0)
+        self.assertTrue(any("from origin/foo-bar @" in n for n in self.notes))
+
+    def test_explicit_fetch_overcomes_a_narrow_refspec_and_uses_the_named_remote(self):
+        fresh = self.push_branch_elsewhere("feature only")
+        self.repo.git("remote", "rename", "origin", "upstream")
+        self.repo.git("config", "remote.upstream.fetch", "+refs/heads/main:refs/remotes/upstream/main")
+        self.repo.git("remote", "add", "origin", str(self.root / "unreachable.git"))
+        _, at = self.make(**{"from": "refs/remotes/upstream/foo-bar"})
+        self.assertEqual(at, fresh)
+
+    def test_remote_shorthand_and_remote_names_with_slashes(self):
+        fresh = self.push_branch_elsewhere("feature")
+        self.repo.git("remote", "rename", "origin", "team/upstream")
+        _, at = self.make(**{"from": "remotes/team/upstream/foo-bar"})
+        self.assertEqual(at, fresh)
+
+    def test_a_fully_qualified_local_ref_is_not_a_remote_fetch_request(self):
+        local = self.sha(self.repo.path, "HEAD")
+        self.repo.git("branch", "origin/local-only")
+        _, at = self.make(**{"from": "refs/heads/origin/local-only"})
+        self.assertEqual(at, local)
+
+    def test_a_remote_tracking_ref_without_a_remote_requires_no_fetch(self):
+        self.repo.git("update-ref", "refs/remotes/removed/feature", "HEAD")
+        with self.assertRaises(SystemExit):
+            self.make(**{"from": "refs/remotes/removed/feature"})
+        _, at = self.make(fetch=False, **{"from": "refs/remotes/removed/feature"})
+        self.assertEqual(at, self.sha(self.repo.path, "HEAD"))
+
+    def test_an_explicit_local_ref_works_without_any_remote(self):
+        self.repo.git("remote", "remove", "origin")
+        _, at = self.make(**{"from": "HEAD"})
+        self.assertEqual(at, self.sha(self.repo.path, "HEAD"))
+
+    def test_remote_revision_is_resolved_after_fetch(self):
+        first = self.push_branch_elsewhere("first feature")
+        self.push_branch_elsewhere("second feature")
+        _, at = self.make(**{"from": "origin/foo-bar~1"})
+        self.assertEqual(at, first)
+
+    def test_explicit_refs_never_silently_fall_back(self):
+        for ref in ("missing", "HEAD..HEAD", "--help", "HEAD\n", "", "HEAD:README"):
+            with self.subTest(ref=ref), self.assertRaises(SystemExit):
+                self.make(fetch=False, **{"from": ref})
+        self.assertFalse((self.base / "s" / "widget").exists())
+        self.assertFalse(ais.has_ref(self.repo.path, "refs/heads/s"))
+
+    def test_ambiguous_branch_tag_and_revision_are_rejected(self):
+        self.repo.git("branch", "ambiguous")
+        self.repo.git("tag", "ambiguous")
+        self.repo.git("config", "core.warnAmbiguousRefs", "false")
+        for ref in ("ambiguous", "ambiguous~0"):
+            with self.subTest(ref=ref), self.assertRaises(SystemExit):
+                self.make(fetch=False, **{"from": ref})
+        _, at = self.make(fetch=False, **{"from": "refs/heads/ambiguous"})
+        self.assertEqual(at, self.sha(self.repo.path, "HEAD"))
+
+    def test_explicit_local_tag_sha_and_revision(self):
+        first = self.sha(self.repo.path, "HEAD")
+        self.repo.git("branch", "feature/parser")
+        self.repo.git("branch", "head")
+        self.repo.git("tag", "-a", "v1.0", "-m", "release")
+        self.commit("later")
+        for i, ref in enumerate(("feature/parser", "refs/heads/head", "v1.0", first[:9], "HEAD~1")):
+            with self.subTest(ref=ref):
+                _, at = self.make(f"s{i}", fetch=False, **{"from": ref})
+                self.assertEqual(at, first)
+
+    def test_explicit_detach_uses_the_requested_commit_even_if_session_branch_exists(self):
+        first = self.sha(self.repo.path, "HEAD")
+        self.repo.git("tag", "release")
+        self.repo.git("branch", "s")
+        self.commit("later")
+        dest, at = self.make(fetch=False, detach=True, **{"from": "release"})
+        self.assertEqual(at, first)
+        self.assertEqual(ais.worktree_branch(dest), "(detached)")
+
+    def test_failed_explicit_fetch_is_fatal_unless_disabled(self):
+        self.push_branch_elsewhere("cached feature")
+        self.repo.git("fetch", "origin")
+        cached = self.sha(self.repo.path, "origin/foo-bar")
+        self.repo.git("remote", "set-url", "origin", str(self.root / "gone.git"))
+        with self.assertRaises(SystemExit):
+            self.make(**{"from": "origin/foo-bar"})
+        self.assertFalse(ais.has_ref(self.repo.path, "refs/heads/s"))
+        _, at = self.make(fetch=False, **{"from": "origin/foo-bar"})
+        self.assertEqual(at, cached)
+
+    def test_deleted_remote_branch_does_not_use_its_stale_tracking_ref(self):
+        self.push_branch_elsewhere("feature")
+        self.repo.git("fetch", "origin")
+        subprocess.run(["git", "-C", str(self.repo.origin), "update-ref", "-d", "refs/heads/foo-bar"],
+                       check=True)
+        with self.assertRaises(SystemExit):
+            self.make(**{"from": "origin/foo-bar"})
+
+    def test_explicit_ref_conflicts_with_an_existing_local_session_branch(self):
+        self.repo.git("branch", "s")
+        old = self.sha(self.repo.path, "s")
+        self.commit("different base")
+        with self.assertRaises(SystemExit):
+            self.make(fetch=False, **{"from": "HEAD"})
+        self.assertEqual(self.sha(self.repo.path, "s"), old)
+
+    def test_explicit_ref_overrides_a_same_named_remote_session_branch(self):
+        other = self.push_branch_elsewhere("unrelated work", "s")
+        _, at = self.make(**{"from": "HEAD"})
+        self.assertNotEqual(at, other)
+        self.assertEqual(at, self.sha(self.repo.path, "HEAD"))
+
+    def test_an_existing_worktree_is_reused_without_fetch_or_ref_resolution(self):
+        dest, first = self.make()
+        self.repo.git("remote", "set-url", "origin", str(self.root / "gone.git"))
+        again, at = self.make(**{"from": "origin/missing"})
+        self.assertEqual((dest, first), (again, at))
+        self.assertIn("starting ref not applied", self.notes[-1])
+
+    def test_explicit_ref_does_not_probe_the_remote_default_with_fetch_disabled(self):
+        ais.git("-C", str(self.repo.path), "symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
+        with mock.patch.object(ais, "remote_default", side_effect=AssertionError("default probe")):
+            _, at = self.make(fetch=False, **{"from": "HEAD"})
+        self.assertEqual(at, self.sha(self.repo.path, "HEAD"))
+
     def test_a_repo_with_no_remote_starts_from_its_main(self):
         self.repo.git("remote", "remove", "origin")
         _, at = self.make(**{"from": "origin"})
@@ -991,6 +1143,56 @@ class SessionWorktrees(unittest.TestCase):
             {"base": str(self.base / "fix-the-thing"), "initial": str(dest),
              "branch": "fix-the-thing", "root": str(self.repo.path)},
         )
+
+    def test_start_and_wt_add_apply_overrides_without_carrying_refs_between_repos(self):
+        self.repo.git("branch", "feature")
+        self.repo.git("checkout", "--quiet", "feature")
+        (self.repo.path / "README").write_text("feature\n")
+        self.repo.git("commit", "--quiet", "-am", "feature")
+        feature = self.repo.git("rev-parse", "HEAD").stdout.strip()
+        self.repo.git("checkout", "--quiet", "main")
+        settings = ais.worktree_settings({"worktree": {"fetch": True}})
+        self.repo.git("remote", "set-url", "origin", str(self.root / "gone.git"))
+        session = dict(self.session)
+        ais.make_session_worktree(session, {"root": str(self.repo.path), "repo": "widget",
+                                           "from": "feature", "fetch": False}, settings)
+        self.assertEqual(ais.git("-C", session["cwd"], "rev-parse", "HEAD").stdout.strip(), feature)
+        self.assertNotIn("from", self.stored()["worktree"])
+        other = Repo(self.root, "gadget")
+        self.add(other)  # feature does not exist in this repo; use config's auto
+        third = Repo(self.root, "third")
+        third.git("tag", "release")
+        third.git("remote", "set-url", "origin", str(self.root / "gone" / "third.git"))
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            ais.main(["wt", "add", "--from", "release", "--no-fetch", str(third.path)])
+        self.assertEqual(out.getvalue().strip(), str(self.base / "fix-the-thing" / "third"))
+
+    def test_run_threads_ref_and_fetch_overrides_into_the_creation_request(self):
+        with mock.patch.object(ais, "require_tmux", return_value="%1"), \
+             mock.patch.object(ais, "capture_tmux_location", return_value={"pane_id": "%1"}), \
+             mock.patch.object(ais, "launch", return_value=0) as launch:
+            ais.main(["run", "pi", "-w", "--cwd", str(self.repo.path),
+                      "--from", "origin/foo-bar", "--fetch"])
+        session = launch.call_args.args[0]
+        self.assertEqual(session["worktree_request"]["from"], "origin/foo-bar")
+        self.assertIs(session["worktree_request"]["fetch"], True)
+
+    def test_restart_keeps_the_worktree_without_fetching_or_resolving_its_base(self):
+        session = dict(self.session)
+        ais.make_session_worktree(session, {"root": str(self.repo.path), "repo": "widget",
+                                           "from": "HEAD", "fetch": False}, self.settings())
+        def localize(sessions):
+            sessions[0]["hostname"] = ais.socket.gethostname()
+        ais.mutate_sessions(localize)
+        with mock.patch.object(ais, "require_tmux", return_value="%1"), \
+             mock.patch.object(ais, "capture_tmux_location", return_value={"pane_id": "%1"}), \
+             mock.patch.object(ais, "ensure_worktree", side_effect=AssertionError("recreated")), \
+             mock.patch.object(ais, "launch", return_value=0) as launch:
+            ais.cmd_restart(argparse.Namespace(id="sess000001", fresh=True, dry_run=False))
+        restarted = launch.call_args.args[0]
+        self.assertNotIn("worktree_request", restarted)
+        self.assertEqual(restarted["cwd"], session["cwd"])
+        self.assertEqual(restarted["worktree"], session["worktree"])
 
     def test_a_shell_beside_a_worktree_session_knows_the_main_checkout(self):
         session = dict(self.session)
@@ -1266,6 +1468,14 @@ class Api(unittest.TestCase):
         claude = next(p for p in data["profiles"] if p["name"] == "claude")
         self.assertTrue(claude["resumable"] and claude["forkable"])
 
+    def test_state_advertises_ref_support_and_fetch_default(self):
+        self.assertTrue(self.state()["worktree"]["supports_refs"])
+        self.assertTrue(self.state()["worktree"]["fetch"])
+        with ais.CONFIG_PATH.open("a") as f:
+            f.write('\n[worktree]\nfrom = "origin/feature"\nfetch = false\n')
+        self.assertEqual(self.state()["worktree"]["from"], "origin/feature")
+        self.assertFalse(self.state()["worktree"]["fetch"])
+
     def test_state_says_what_can_be_done(self):
         by_id = {s["id"]: s for s in self.state()["sessions"]}
         here, there = by_id["dead000001"], by_id["gone000001"]
@@ -1494,6 +1704,20 @@ class RunCommand(unittest.TestCase):
     def test_fork_and_worktree_do_not_mix(self):
         with self.assertRaises(SystemExit):
             ais.main(["run", "--fork", "abc", "-w"])
+
+    def test_ref_and_fetch_flags_in_both_run_syntaxes(self):
+        ais.main(["run", "pi", "-w", "--from", "origin/foo-bar", "--fetch"])
+        ais.main(["-w", "--from", "origin/foo-bar", "--no-fetch", "--", "pi"])
+        self.assertEqual([a.wt_from for a, _ in self.seen], ["origin/foo-bar"] * 2)
+        self.assertEqual([a.fetch for a, _ in self.seen], [True, False])
+        self.assertEqual(ais.run_parser().parse_args([]).fetch, None)
+
+    def test_creation_flags_cannot_be_used_with_fork_or_no_worktree(self):
+        for prefix in (["run", "pi", "--no-worktree"], ["run", "--fork", "abc"]):
+            for flags in (["--from", "origin/foo"], ["--fetch"], ["--no-fetch"]):
+                with self.subTest(prefix=prefix, flags=flags), self.assertRaises(SystemExit):
+                    ais.main(prefix + flags)
+        self.assertEqual(self.seen, [])
 
 
 if __name__ == "__main__":
