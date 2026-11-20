@@ -303,6 +303,41 @@ a fresh interactive shell rather than run as the pane's command, so it runs as
 a job of that shell exactly as if you had typed it, and the shell is still
 there when it ends.
 
+## Writing long prompts beside the agent: `tsm compose`
+
+A harness's own `^g` hands the prompt to `$EDITOR` and waits, so the agent's
+output is gone until you quit the editor. Make tsm the harness's editor
+instead:
+
+```toml
+# ~/.ais/config.toml
+[profile.claude.env]
+EDITOR = "~/.local/bin/tsm compose --hook"
+[profile.pi.env]
+EDITOR = "~/.local/bin/tsm compose --hook"
+```
+
+Now `^g` takes what is in the prompt box, empties it and gives the harness
+back at once. The editor opens in a split to the right — on the topmost tmux
+that shows the agent: for an agent on a remote, beside the pane here that
+reaches it (through `tsm relay`), so typing never waits on the network. Scroll
+and read the agent while you write. Save and quit, and the text is pasted
+into the prompt box as one bracketed paste — not sent; you press enter there.
+Quit with an empty file to send nothing.
+
+- The real editor is `$TSM_EDITOR`, else `$VISUAL`/`$EDITOR` (unless that is
+  the hook), else `vi`.
+- Only the prompt box goes to the split (claude's `claude-prompt-*.md`, pi's
+  `pi-editor-*/prompt.md`). Any other file — claude's `/memory` opening
+  CLAUDE.md — is edited in place by the real editor, as before.
+- One editor per agent: `^g` again focuses the open one, and the box keeps
+  what is in it.
+- The draft lives in `~/.cache/tsm/drafts/` until it has arrived. If the
+  remote is gone when you quit, the split offers retry, edit again, or quit;
+  the next `^g` for that agent starts from the kept draft.
+- Without a relay above (or one that cannot show the agent), the split opens
+  on the agent's own tmux.
+
 ## Speed
 
 The popup draws its first frame from the tmux query alone, ~13ms after the

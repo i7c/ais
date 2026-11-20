@@ -205,6 +205,14 @@ func (rl *relay) session(r Remote) (heard bool, err error) {
 				w.send(wire{Type: "ack", ID: n.ID, Result: result})
 				saveSince(name, n.ID)
 			}()
+		case "compose":
+			if m.Compose == nil {
+				continue
+			}
+			c := *m.Compose
+			go func() {
+				w.send(wire{Type: "ack", ID: c.ID, Result: rl.compose(c, r.Conf)})
+			}()
 		case "replay":
 			if len(m.Notes) > 0 {
 				rl.route(summarize(m.Notes, name), r.Conf)

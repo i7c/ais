@@ -9,7 +9,7 @@ import (
 // the tsm on that host ("tsm _op"), which does them with the same code.
 // It names rows by tmux ids, which mean the same on both ends.
 type Op struct {
-	Action  string    `json:"action"` // focus zoom sibling duplicate restart kill rename create moves
+	Action  string    `json:"action"` // focus zoom sibling duplicate restart kill rename create moves paste
 	Kind    RowKind   `json:"kind"`
 	Session string    `json:"session,omitempty"`
 	Window  string    `json:"window,omitempty"`
@@ -19,6 +19,7 @@ type Op struct {
 	Name    string    `json:"name,omitempty"`
 	Create  *WireSpec `json:"create,omitempty"`
 	Plan    []MoveOp  `json:"plan,omitempty"`
+	Text    string    `json:"text,omitempty"` // paste: what goes into the pane
 	// Link names the tmux client to move, on a host tsm reaches over ssh
 	// and so has no client of its own there (see "tsm attach").
 	Link string `json:"link,omitempty"`
@@ -115,6 +116,12 @@ func Exec(acts Actions, st *AisState, op Op) (Outcome, error) {
 			return Outcome{Status: fmt.Sprintf("ran %d of %d move(s)", done, len(op.Plan))}, err
 		}
 		return Outcome{Status: fmt.Sprintf("moved — %d change(s) made", done)}, nil
+	}
+	if op.Action == "paste" {
+		if acts.snap.Pane(op.Pane) == nil {
+			return Outcome{}, fmt.Errorf("pane %s is gone", op.Pane)
+		}
+		return Outcome{Status: "pasted"}, acts.tmux.Paste(op.Pane, op.Text)
 	}
 	if op.Action == "create" {
 		if op.Create == nil {

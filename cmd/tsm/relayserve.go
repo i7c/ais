@@ -21,7 +21,7 @@ import (
 //
 // The wire is one JSON object per line, both ways.
 type wire struct {
-	Type    string   `json:"type"` // hello ack seen | notify replay state
+	Type    string   `json:"type"` // hello ack seen | notify replay state compose
 	Proto   int      `json:"proto,omitempty"`
 	Since   string   `json:"since,omitempty"`
 	ID      string   `json:"id,omitempty"`
@@ -30,6 +30,14 @@ type wire struct {
 	Notes   []Note   `json:"notes,omitempty"`
 	Payload *Payload `json:"payload,omitempty"`
 	Pane    string   `json:"pane,omitempty"` // seen: the pane you have been looking at
+	Compose *Compose `json:"compose,omitempty"`
+}
+
+// sockMsg is what comes in on the relay socket: a note from ais, or a
+// compose from "tsm compose --hook".
+type sockMsg struct {
+	Note
+	Compose *Compose `json:"compose,omitempty"`
 }
 
 type wireWriter struct {
@@ -127,11 +135,18 @@ func serveRelay(t Tmux, a Ais, in io.Reader, out io.Writer) int {
 			go func(conn net.Conn) {
 				defer conn.Close()
 				conn.SetDeadline(time.Now().Add(ackWait + 2*time.Second))
-				var n Note
-				if json.NewDecoder(bufio.NewReader(conn)).Decode(&n) != nil {
+				var in sockMsg
+				if json.NewDecoder(bufio.NewReader(conn)).Decode(&in) != nil {
 					return
 				}
-				if n.Host == "" {
+				n := in.Note
+				m := wire{Type: "notify", Note: &n}
+				result, wait := resultUndelivered, ackWait
+				if in.Compose != nil {
+					n.ID = in.Compose.ID
+					m = wire{Type: "compose", Compose: in.Compose}
+					result, wait = composeDeclined, composeWait
+				} else if n.Host == "" {
 					n.Host = hostname()
 				}
 				ch := make(chan string, 1)
@@ -139,11 +154,10 @@ func serveRelay(t Tmux, a Ais, in io.Reader, out io.Writer) int {
 				waiting[n.ID] = ch
 				mu.Unlock()
 				defer func() { mu.Lock(); delete(waiting, n.ID); mu.Unlock() }()
-				result := resultUndelivered
-				if w.send(wire{Type: "notify", Note: &n}) == nil {
+				if w.send(m) == nil {
 					select {
 					case result = <-ch:
-					case <-time.After(ackWait):
+					case <-time.After(wait):
 					}
 				}
 				json.NewEncoder(conn).Encode(map[string]string{"result": result})

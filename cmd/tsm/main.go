@@ -24,6 +24,11 @@ const usage = `usage: tsm                open the manager (made for a tmux popup
        tsm relay          carry notifications (and snapshots) up from the
                           remotes to here; "tsm relay status" says how it is
        tsm notify --stdin ais's [notify] sink: pass a notification up
+       tsm compose --hook FILE
+                          a harness's EDITOR: write the prompt in a split
+                          beside the agent (on the topmost tmux), then paste
+                          it back into the prompt box; the real editor is
+                          $TSM_EDITOR, else $VISUAL/$EDITOR, else vi
 
   bind-key a display-popup -E -w 90% -h 80% -T " tsm " "tsm"
   set -g status-right '#(tsm status --pane #{pane_id}) %H:%M'
@@ -81,6 +86,8 @@ func run(args []string) int {
 			}
 			fmt.Fprint(os.Stderr, usage)
 			return 2
+		case "compose":
+			return cmdCompose(t, args[1:])
 		case "attach":
 			if confErr != nil {
 				fmt.Fprintln(os.Stderr, "tsm:", confErr)
