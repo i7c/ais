@@ -810,6 +810,7 @@ def reap(sessions: list[dict]) -> int:
     nothing about a pid here.
     """
     host = socket.gethostname()
+    revive(sessions, host)
     candidates = [
         s for s in sessions
         if s.get("status") == "active" and s.get("hostname") == host
@@ -833,6 +834,34 @@ def reap(sessions: list[dict]) -> int:
         s["reaped"] = True
         reaped += 1
     return reaped
+
+
+def revive(sessions: list[dict], host: str) -> None:
+    """Undo a reap that was wrong: a session that is still running.
+
+    Before launcher_pid, a reader that reaped in the moment between a session
+    being recorded and its harness getting a pid buried it alive, and a reap
+    is never revisited. A reaped session whose process is alive and whose pane
+    still carries its own @ais_id mark is running: only ais sets that mark,
+    and it takes it away when the session ends, so pid reuse cannot fake it.
+    """
+    buried = [
+        s for s in sessions
+        if s.get("status") == "dead" and s.get("reaped") and s.get("hostname") == host
+        and process_alive(s.get("pid"))
+    ]
+    if not buried:
+        return
+    res = tmux("list-panes", "-a", "-F", "#{pane_id}\t#{@ais_id}")
+    if res.returncode != 0:
+        return
+    marks = dict(line.split("\t", 1) for line in res.stdout.splitlines() if "\t" in line)
+    for s in buried:
+        if marks.get((s.get("tmux") or {}).get("pane_id")) == s.get("id"):
+            s["status"] = "active"
+            s["ended_at"] = None
+            s["exit_code"] = None
+            s.pop("reaped", None)
 
 
 # ---------------------------------------------------------------- display

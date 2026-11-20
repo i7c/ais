@@ -26,6 +26,7 @@ func processAlive(pid int) bool {
 // nothing about a pid here.
 func reap(ss []*Record) int {
 	host := hostname()
+	revive(ss, host)
 	var candidates []*Record
 	for _, s := range ss {
 		if s.Status == "active" && s.Hostname == host {
@@ -64,6 +65,43 @@ func reap(ss []*Record) int {
 		reaped++
 	}
 	return reaped
+}
+
+// revive undoes a reap that was wrong: a session that is still running.
+//
+// Before launcher_pid, a reader that reaped in the moment between a session
+// being recorded and its harness getting a pid buried it alive, and a reap is
+// never revisited. A reaped session whose process is alive and whose pane
+// still carries its own @ais_id mark is running: only ais sets that mark, and
+// it takes it away when the session ends, so pid reuse cannot fake it.
+func revive(ss []*Record, host string) {
+	var buried []*Record
+	for _, s := range ss {
+		if s.Status == "dead" && s.Reaped && s.Hostname == host && processAlive(s.pid()) {
+			buried = append(buried, s)
+		}
+	}
+	if len(buried) == 0 {
+		return
+	}
+	r := tmux("list-panes", "-a", "-F", "#{pane_id}\t#{@ais_id}")
+	if !r.ok() {
+		return
+	}
+	marks := map[string]string{}
+	for _, line := range strings.Split(r.Stdout, "\n") {
+		if pane, mark, ok := strings.Cut(line, "\t"); ok {
+			marks[pane] = mark
+		}
+	}
+	for _, s := range buried {
+		if marks[s.Tmux["pane_id"]] == s.ID {
+			s.Status = "active"
+			s.EndedAt = nil
+			s.ExitCode = nil
+			s.Reaped = false
+		}
+	}
 }
 
 // rememberSessionID appends a conversation id to a session's history.
