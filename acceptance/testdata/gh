@@ -1,0 +1,61 @@
+#!/usr/bin/env python3
+"""A stand-in gh for the acceptance suite: one Projects (v2) board in a file.
+
+State lives in $FAKE_LOG/gh/: project.json ({"items": [...]} as gh prints it),
+comments.json (what "gh issue comment" was asked to post), calls.log (every
+call), and an optional "fail" file naming a subcommand ("item-edit",
+"item-list", "comment") that should fail.
+"""
+import json, os, sys
+
+root = os.path.join(os.environ["FAKE_LOG"], "gh")
+os.makedirs(root, exist_ok=True)
+board = os.path.join(root, "project.json")
+args = sys.argv[1:]
+with open(os.path.join(root, "calls.log"), "a") as fh:
+    fh.write(" ".join(args) + "\n")
+
+def opt(name):
+    return args[args.index(name) + 1] if name in args else None
+
+fail = open(os.path.join(root, "fail")).read().strip() if os.path.exists(os.path.join(root, "fail")) else ""
+STATUSES = ["Todo", "ready", "scheduled", "In Progress", "Done"]
+
+def load():
+    return json.load(open(board)) if os.path.exists(board) else {"items": []}
+
+if args[:2] == ["project", "item-list"]:
+    if fail == "item-list":
+        sys.exit("HTTP 502: fake failure")
+    print(json.dumps(load()))
+elif args[:2] == ["project", "view"]:
+    print(json.dumps({"id": "PVT_fake", "number": int(args[2])}))
+elif args[:2] == ["project", "field-list"]:
+    print(json.dumps({"fields": [
+        {"id": "F_title", "name": "Title", "type": "ProjectV2Field"},
+        {"id": "F_status", "name": "Status", "type": "ProjectV2SingleSelectField",
+         "options": [{"id": "opt-" + s.replace(" ", "-"), "name": s} for s in STATUSES]},
+    ]}))
+elif args[:2] == ["project", "item-edit"]:
+    if fail == "item-edit":
+        sys.exit("HTTP 502: fake failure")
+    if opt("--project-id") != "PVT_fake" or opt("--field-id") != "F_status":
+        sys.exit("wrong project or field id")
+    name = {"opt-" + s.replace(" ", "-"): s for s in STATUSES}.get(opt("--single-select-option-id"))
+    data = load()
+    for it in data["items"]:
+        if it["id"] == opt("--id"):
+            it["status"] = name
+            break
+    else:
+        sys.exit("no such item " + str(opt("--id")))
+    json.dump(data, open(board, "w"))
+elif args[:2] == ["issue", "comment"]:
+    if fail == "comment":
+        sys.exit("HTTP 502: fake failure")
+    path = os.path.join(root, "comments.json")
+    comments = json.load(open(path)) if os.path.exists(path) else []
+    comments.append({"url": args[2], "body": opt("--body")})
+    json.dump(comments, open(path, "w"))
+else:
+    sys.exit("fake gh does not know: " + " ".join(args))

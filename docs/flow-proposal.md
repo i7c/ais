@@ -1,6 +1,6 @@
 # Proposal: `ais flow` — planned, dispatched agent sessions
 
-Status: **agreed; steps 0–4 done** (2026-11-20)
+Status: **agreed; steps 0–5 done** (2026-11-20)
 
 ## 1. What this is for
 
@@ -505,10 +505,16 @@ Each step is one or two commits and usable on its own.
      and pi's `input` by `ais install`. Verified with real claude.
    - **Multi-repo starts:** `ais run --repos a,b` makes one worktree per
      repo under the session directory.
-5. **flow core.**
-   - `flow.db` and the `[workspace]` config.
-   - The GitHub project source: read, write, id cache.
-   - `ais flow ready`, `queue add/ls/cancel`, `limit`, `ls`, `log`.
+5. **flow core.** Done 2026-11-20 (`internal/flow`).
+   - **State:** `flow.db` uses SQLite (`modernc.org/sqlite`, pure Go), with
+     one open planner per workspace enforced by a unique index.
+   - **Config:** `[flow]` and `[workspace.<name>]`.
+   - **GitHub:** the Projects v2 source goes through `gh`, with the board's
+     ids cached.
+   - **Commands:** `ais flow ready`, `queue add/ls/show/edit/cancel`,
+     `limit`, `ls` and `log`.
+   - **Tests:** black-box against a fake `gh` board, and read-only against
+     gpwsoi/3.
 6. **Dispatcher.**
    - `dispatch`, `start`, `done`, `dispatch --now`, the limits and
      overrides, reconcile.

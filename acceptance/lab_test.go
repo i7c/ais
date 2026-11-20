@@ -112,7 +112,7 @@ func NewLab(t *testing.T) *Lab {
 	for _, d := range []string{l.Home, l.AisHome, l.Bin, l.Log} {
 		must(t, os.MkdirAll(d, 0o755))
 	}
-	for _, name := range []string{"fake", "sink", "notify-send"} {
+	for _, name := range []string{"fake", "sink", "notify-send", "gh"} {
 		must(t, os.Symlink(testdata(name), filepath.Join(l.Bin, name)))
 	}
 	// "ais" on PATH is the one under test, ahead of any installed one: hooks
