@@ -11,6 +11,11 @@
 #   --nested-report ID report it from a child process that is itself a "fake",
 #                      as a harness nested inside the session would
 #
+# A first prompt (what follows "--", as ais passes one) is submitted through
+# "ais _activity" before the fake is ready, as claude's UserPromptSubmit hook
+# does; later a test can write text to the "submit" file in the session's log
+# directory to submit it as if typed, and waits for "submitted-<n>".
+#
 # Everything else is ignored, and recorded.
 set -u
 sid="${AIS_SESSION:-none}"
@@ -39,7 +44,23 @@ while [ $# -gt 0 ]; do
   shift
 done
 
+submit() { printf '{"prompt":"%s"}' "$1" | ais _activity; }
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--" ]; then submit "$arg"; fi
+  prev="$arg"
+done
+
 touch "$dir/ready"
-while [ ! -e "$dir/exit" ]; do sleep 0.05; done
+n=0
+while [ ! -e "$dir/exit" ]; do
+  if [ -e "$dir/submit" ]; then
+    n=$((n + 1))
+    submit "$(cat "$dir/submit")"
+    rm -f "$dir/submit"
+    touch "$dir/submitted-$n"
+  fi
+  sleep 0.05
+done
 code=$(cat "$dir/exit")
 exit "${code:-0}"

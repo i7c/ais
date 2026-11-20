@@ -41,6 +41,7 @@ type Lab struct {
 	env     []string
 	ais     string
 	windows int
+	submits map[string]int
 }
 
 // aisUnderTest is the ais to test: $AIS_BIN, else cmd/ais of this checkout,
@@ -107,6 +108,7 @@ func NewLab(t *testing.T) *Lab {
 		ais:    aisUnderTest(t),
 	}
 	l.AisHome = filepath.Join(l.Home, ".ais")
+	l.submits = map[string]int{}
 	for _, d := range []string{l.Home, l.AisHome, l.Bin, l.Log} {
 		must(t, os.MkdirAll(d, 0o755))
 	}
@@ -160,6 +162,8 @@ func (l *Lab) BaseConfig() string {
 	return fmt.Sprintf(`[profile.fake]
 command = [%q]
 flags = ["--from-config"]
+
+prompt = ["--", "{prompt}"]
 
 [profile.fake.env]
 FAKE_PROFILE_ENV = "from-profile"
@@ -374,6 +378,17 @@ func (l *Lab) Stop(s Started, code int) {
 	l.Eventually("ais in "+s.Pane+" returns", func() bool { return fileExists(s.ExitFile) })
 }
 
+// Submit has a session's fake harness send text as if typed, and waits
+// until ais has been told.
+func (l *Lab) Submit(s Started, text string) {
+	l.t.Helper()
+	dir := filepath.Join(l.Log, s.ID)
+	l.submits[s.ID]++
+	l.WriteFile(filepath.Join(dir, "submit"), text)
+	done := filepath.Join(dir, fmt.Sprintf("submitted-%d", l.submits[s.ID]))
+	l.Eventually("fake submits "+text, func() bool { return fileExists(done) })
+}
+
 // AisExit is what the ais process in a stopped session's pane exited with.
 func (l *Lab) AisExit(s Started) string {
 	return strings.TrimSpace(l.ReadFile(s.ExitFile))
@@ -425,6 +440,7 @@ type Profile struct {
 	Flags     []string `json:"flags"`
 	Resumable bool     `json:"resumable"`
 	Forkable  bool     `json:"forkable"`
+	Prompts   bool     `json:"prompts"`
 }
 
 type Session struct {
@@ -448,6 +464,7 @@ type Session struct {
 	CanRestart   bool              `json:"can_restart"`
 	CanResume    bool              `json:"can_resume"`
 	CanFork      bool              `json:"can_fork"`
+	LastInputAt  *string           `json:"last_input_at"`
 	Notes        []Notification    `json:"notifications"`
 }
 

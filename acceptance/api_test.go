@@ -24,12 +24,12 @@ func TestStateSchema(t *testing.T) {
 	requireKeys(t, "state", raw, "api", "host", "worktree", "notify_window", "notify_seen_after", "profiles", "sessions")
 	requireKeys(t, "state.worktree", raw["worktree"].(map[string]any), "base", "auto", "from", "detach")
 	prof := raw["profiles"].([]any)[0].(map[string]any)
-	requireKeys(t, "profile", prof, "name", "command", "flags", "resumable", "forkable")
+	requireKeys(t, "profile", prof, "name", "command", "flags", "resumable", "forkable", "prompts")
 	sess := raw["sessions"].([]any)[0].(map[string]any)
 	requireKeys(t, "session", sess,
 		"id", "profile", "description", "name", "status", "host", "cwd", "worktree", "tmux",
 		"pid", "started_at", "ended_at", "exit_code", "conversation", "args", "restart_of",
-		"fork_of", "can_restart", "can_resume", "can_fork", "notifications")
+		"fork_of", "can_restart", "can_resume", "can_fork", "last_input_at", "notifications")
 	requireKeys(t, "session.tmux", sess["tmux"].(map[string]any),
 		"session_name", "session_id", "window_id", "window_index", "pane_id", "pane_index")
 

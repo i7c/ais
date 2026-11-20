@@ -35,7 +35,12 @@ type Record struct {
 	RestartOf   string            `json:"restart_of,omitempty"`
 	ForkOf      string            `json:"fork_of,omitempty"`
 	Reaped      bool              `json:"reaped,omitempty"`
-	Notes       []Note            `json:"notifications,omitempty"`
+	// The first prompt ais gave the harness, so that its own UserPromptSubmit
+	// is not mistaken for you typing (see cmdActivity).
+	InitialPrompt     string `json:"initial_prompt,omitempty"`
+	InitialPromptSeen bool   `json:"initial_prompt_seen,omitempty"`
+	LastInputAt       string `json:"last_input_at,omitempty"` // when you last sent the harness a prompt
+	Notes             []Note `json:"notifications,omitempty"`
 
 	Extra map[string]json.RawMessage `json:"-"`
 }
@@ -113,7 +118,8 @@ func knownKeys(v any) map[string]bool {
 	case *Record:
 		for _, k := range []string{"id", "description", "profile", "harness", "command", "harness_args",
 			"session_ids", "status", "pid", "launcher_pid", "hostname", "cwd", "tmux", "started_at",
-			"ended_at", "exit_code", "slug", "worktree", "restart_of", "fork_of", "reaped", "notifications"} {
+			"ended_at", "exit_code", "slug", "worktree", "restart_of", "fork_of", "reaped", "notifications",
+			"initial_prompt", "initial_prompt_seen", "last_input_at"} {
 			names[k] = true
 		}
 	case *Note:

@@ -184,6 +184,9 @@ func startSession(aisArgs, harnessArgv []string) int {
 		{names: []string{"--fork"}, kind: valueOpt},
 		{names: []string{"-n", "--dry-run"}, kind: flagOpt},
 		{names: []string{"-h", "--help"}, kind: flagOpt},
+		{names: []string{"--prompt"}, kind: valueOpt},
+		{names: []string{"--prompt-file"}, kind: valueOpt},
+		{names: []string{"--repos"}, kind: listOpt},
 	}, worktreeOpts...), true)
 	if p.flags["-h"] {
 		fmt.Print(usage())
@@ -201,6 +204,18 @@ func startSession(aisArgs, harnessArgv []string) int {
 		Cwd:         p.values["--cwd"],
 		Fork:        p.values["--fork"],
 		DryRun:      p.flags["-n"],
+		Prompt:      p.value("--prompt"),
+		PromptFile:  p.values["--prompt-file"],
+	}
+	for _, list := range p.lists["--repos"] {
+		for _, repo := range strings.Split(list, ",") {
+			if repo = strings.TrimSpace(repo); repo != "" {
+				a.Repos = append(a.Repos, repo)
+			}
+		}
+	}
+	if a.Fork != "" && (len(a.Repos) > 0 || a.Prompt != nil || a.PromptFile != "") {
+		die("--fork continues a conversation in the session's own directory; --repos and --prompt have nothing to do there")
 	}
 	if a.Fork != "" && (a.Worktree != nil && *a.Worktree || a.From != "" || a.Detach != nil) {
 		die("--fork runs in the session's own directory; -w has nothing to do there")
@@ -217,7 +232,7 @@ func startSession(aisArgs, harnessArgv []string) int {
 var commands = []string{
 	"select", "ls", "status", "notify", "prune", "current", "name",
 	"restart", "install", "instructions", "wt", "state", "env",
-	"_preview", "_session-seen", "_mark-seen",
+	"_preview", "_session-seen", "_mark-seen", "_activity",
 }
 
 func dispatch(argv []string) int {
@@ -361,6 +376,9 @@ func dispatch(argv []string) int {
 	case "_session-seen":
 		p := parse(rest, []option{{names: []string{"-v", "--verbose"}, kind: flagOpt}}, true)
 		return cmdSessionSeen(first(p.pos, 1), p.flags["-v"])
+	case "_activity":
+		p := parse(rest, []option{{names: []string{"--text"}, kind: valueOpt}}, true)
+		return cmdActivity(p.value("--text"))
 	case "_mark-seen":
 		p := parse(rest, []option{
 			{names: []string{"--pane"}, kind: listOpt},

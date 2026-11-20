@@ -94,9 +94,16 @@ func installConfig(harness, block string, dry bool) {
 	report("added", configPath, tbl)
 }
 
-// installHook wires SessionStart to "ais _session-seen" without disturbing
-// the rest. claude fires SessionStart on startup, resume, /clear and /compact
-// — every moment the conversation id can change.
+// claudeHooks are the claude hook events ais listens on, and what it runs.
+// SessionStart fires on startup, resume, /clear and /compact — every moment
+// the conversation id can change; UserPromptSubmit on every prompt you send.
+var claudeHooks = [][2]string{
+	{"SessionStart", "_session-seen"},
+	{"UserPromptSubmit", "_activity"},
+}
+
+// installHook wires claude's hooks to ais without disturbing the rest of
+// settings.json, key order included.
 func installHook(dry, force bool) {
 	path := filepath.Join(claudeDir(), "settings.json")
 	settings := &object{}
@@ -111,29 +118,48 @@ func installHook(dry, force bool) {
 		}
 		settings = obj
 	}
-	command := aisCommand() + " _session-seen"
 	hooksV := settings.setDefault("hooks", &object{})
 	hooks, ok := hooksV.(*object)
 	if !ok {
 		die(`%s: "hooks" is not an object; fix it before installing`, tilde(path))
 	}
-	startsV := hooks.setDefault("SessionStart", &array{})
-	starts, ok := startsV.(*array)
+	changed := false
+	for _, ev := range claudeHooks {
+		if wireHook(path, hooks, ev[0], ev[1], dry, force) {
+			changed = true
+		}
+	}
+	if !changed || dry {
+		return
+	}
+	backup(path, dry)
+	must(os.MkdirAll(filepath.Dir(path), 0o755))
+	tmp := path + ".tmp"
+	must(os.WriteFile(tmp, append(encodeOrdered(settings), '\n'), 0o644))
+	must(os.Rename(tmp, path))
+}
+
+// wireHook makes event run "ais <sub>", reporting what it did; true when it
+// changed the settings.
+func wireHook(path string, hooks *object, event, sub string, dry, force bool) bool {
+	command := aisCommand() + " " + sub
+	listV := hooks.setDefault(event, &array{})
+	list, ok := listV.(*array)
 	if !ok {
-		die(`%s: "hooks.SessionStart" is not an array`, tilde(path))
+		die(`%s: "hooks.%s" is not an array`, tilde(path), event)
 	}
 	var mine []*object
-	for _, m := range starts.items {
+	for _, m := range list.items {
 		matcher, ok := m.(*object)
 		if !ok {
 			continue
 		}
-		list, _ := matcher.get("hooks").(*array)
-		if list == nil {
+		inner, _ := matcher.get("hooks").(*array)
+		if inner == nil {
 			continue
 		}
-		for _, h := range list.items {
-			if hook, ok := h.(*object); ok && strings.Contains(fmt.Sprint(hook.get("command")), "_session-seen") {
+		for _, h := range inner.items {
+			if hook, ok := h.(*object); ok && strings.Contains(fmt.Sprint(hook.get("command")), sub) {
 				mine = append(mine, hook)
 			}
 		}
@@ -141,12 +167,12 @@ func installHook(dry, force bool) {
 	if len(mine) > 0 && !force {
 		for _, h := range mine {
 			if c, _ := h.get("command").(string); c != command {
-				report("check", path, fmt.Sprintf("SessionStart runs %s (--force rewrites it)", pyRepr(fmt.Sprint(h.get("command")))))
-				return
+				report("check", path, fmt.Sprintf("%s runs %s (--force rewrites it)", event, pyRepr(fmt.Sprint(h.get("command")))))
+				return false
 			}
 		}
-		report("unchanged", path, "SessionStart hook already installed")
-		return
+		report("unchanged", path, event+" hook already installed")
+		return false
 	}
 	if len(mine) > 0 {
 		for _, h := range mine {
@@ -158,18 +184,14 @@ func installHook(dry, force bool) {
 		hook.set("command", command)
 		matcher := &object{}
 		matcher.set("hooks", &array{items: []any{hook}})
-		starts.items = append(starts.items, matcher)
+		list.items = append(list.items, matcher)
 	}
 	if dry {
-		report("would wire", path, "SessionStart -> "+command)
-		return
+		report("would wire", path, event+" -> "+command)
+	} else {
+		report("wired", path, event+" -> "+command)
 	}
-	backup(path, dry)
-	must(os.MkdirAll(filepath.Dir(path), 0o755))
-	tmp := path + ".tmp"
-	must(os.WriteFile(tmp, append(encodeOrdered(settings), '\n'), 0o644))
-	must(os.Rename(tmp, path))
-	report("wired", path, "SessionStart -> "+command)
+	return true
 }
 
 func piExtension() string {
@@ -186,7 +208,7 @@ func installExtension(dry, force bool) {
 	wanted := piExtension()
 	data, err := os.ReadFile(path)
 	existing, had := string(data), err == nil
-	detail := "session_start -> ais _session-seen"
+	detail := "session_start -> ais _session-seen, input -> ais _activity"
 	if had && existing == wanted {
 		report("unchanged", path, "session_start extension already current")
 		return

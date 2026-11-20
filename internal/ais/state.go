@@ -74,6 +74,7 @@ func publicSession(r *Record, cfg config, host string) api.Session {
 		CanRestart:    !alive && here && r.Cwd != "" && isDir(r.Cwd),
 		CanResume:     conversation != "" && conf != nil && len(conf.Resume) > 0,
 		CanFork:       here && conversation != "" && conf != nil && len(conf.Fork) > 0,
+		LastInputAt:   r.LastInputAt,
 		Notifications: notes,
 	}
 }
@@ -88,6 +89,7 @@ func publicProfile(name string, cfg config) api.Profile {
 		Name: name, Command: st.Command, Flags: flags,
 		Resumable: st.Session != nil && len(st.Session.Resume) > 0,
 		Forkable:  st.Session != nil && len(st.Session.Fork) > 0,
+		Prompts:   len(st.Prompt) > 0,
 	}
 }
 

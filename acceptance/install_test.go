@@ -46,6 +46,9 @@ func TestInstallClaude(t *testing.T) {
 	if !strings.Contains(mustJSON(t, hooks["SessionStart"]), `ais _session-seen`) {
 		t.Errorf("SessionStart = %s", mustJSON(t, hooks["SessionStart"]))
 	}
+	if !strings.Contains(mustJSON(t, hooks["UserPromptSubmit"]), `ais _activity`) {
+		t.Errorf("UserPromptSubmit = %s", mustJSON(t, hooks["UserPromptSubmit"]))
+	}
 	md := l.ReadFile(claudeMD)
 	if !strings.HasPrefix(md, "# My rules\n\nBe kind.\n") || !strings.Contains(md, sectionBegin) || !strings.Contains(md, sectionEnd) {
 		t.Errorf("CLAUDE.md:\n%s", md)
@@ -74,7 +77,7 @@ func TestInstallPi(t *testing.T) {
 	piDir := filepath.Join(l.Home, ".pi", "agent")
 	l.MustAis(nil, "install", "--harness", "pi")
 	ext := l.ReadFile(filepath.Join(piDir, "extensions", "ais.ts"))
-	if !strings.Contains(ext, "_session-seen") || !strings.Contains(ext, "session_start") {
+	if !strings.Contains(ext, "_session-seen") || !strings.Contains(ext, "session_start") || !strings.Contains(ext, `"_activity"`) {
 		t.Errorf("extension:\n%s", ext)
 	}
 	if md := l.ReadFile(filepath.Join(piDir, "AGENTS.md")); !strings.Contains(md, sectionBegin) {

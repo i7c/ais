@@ -2,6 +2,7 @@ package ais
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -20,6 +21,9 @@ type runArgs struct {
 	Cwd         string
 	Fork        string
 	DryRun      bool
+	Prompt      *string  // --prompt TEXT
+	PromptFile  string   // --prompt-file PATH, "-" for stdin
+	Repos       []string // --repos: a worktree of each, side by side
 }
 
 // wtRequest is acted on by launch once the session has an id and a name to
@@ -27,6 +31,61 @@ type runArgs struct {
 type wtRequest struct {
 	Root, Repo, From string
 	Detach           *bool
+	// Several repos (--repos): one worktree each under the session directory,
+	// which becomes the session's cwd. Root and Repo are unused then.
+	Many []repoRef
+}
+
+type repoRef struct{ Root, Repo string }
+
+// firstPrompt is the text --prompt or --prompt-file gave, or "".
+func firstPrompt(a runArgs) string {
+	if a.Prompt != nil && a.PromptFile != "" {
+		die("--prompt and --prompt-file both give the first prompt; pick one")
+	}
+	if a.Prompt != nil {
+		return *a.Prompt
+	}
+	if a.PromptFile == "" {
+		return ""
+	}
+	var data []byte
+	var err error
+	if a.PromptFile == "-" {
+		data, err = io.ReadAll(os.Stdin)
+	} else {
+		data, err = os.ReadFile(expandUser(a.PromptFile))
+	}
+	if err != nil {
+		die("cannot read the prompt: %v", err)
+	}
+	return strings.TrimRight(string(data), "\n")
+}
+
+// reposRequest resolves --repos to main checkouts, refusing what is not a
+// repo and two repos that would want the same directory.
+func reposRequest(paths []string, a runArgs) *wtRequest {
+	if a.Worktree != nil {
+		die("--repos makes the worktrees itself; leave out -w and --no-worktree")
+	}
+	want := &wtRequest{From: a.From, Detach: a.Detach}
+	seen := map[string]string{}
+	for _, p := range paths {
+		root := repoRoot(expandUser(p))
+		if root == "" {
+			die("--repos: %s is not a git repository", tilde(p))
+		}
+		name := repoName(root)
+		if other, dup := seen[name]; dup {
+			if other == root {
+				continue // the same repo named twice
+			}
+			die("--repos: %s and %s would both be %s/", tilde(other), tilde(root), name)
+		}
+		seen[name] = root
+		want.Many = append(want.Many, repoRef{Root: root, Repo: name})
+	}
+	return want
 }
 
 func cmdRun(a runArgs, harnessArgv []string) int {
@@ -40,7 +99,23 @@ func cmdRun(a runArgs, harnessArgv []string) int {
 	st := harnessSettings(cfg, harness)
 	harnessArgs := harnessArgv[1:]
 	cwd := runDirectory(a)
-	root := worktreeRoot(a.Worktree, st.Worktree.Auto, cwd)
+	var root string
+	var many *wtRequest
+	if len(a.Repos) > 0 {
+		many = reposRequest(a.Repos, a)
+	} else {
+		root = worktreeRoot(a.Worktree, st.Worktree.Auto, cwd)
+	}
+	prompt := firstPrompt(a)
+	var promptArgs []string
+	if prompt != "" {
+		if len(st.Prompt) == 0 {
+			die(`profile %s takes no first prompt; give it one with prompt = ["--", "{prompt}"] under [profile.%s]`, harness, harness)
+		}
+		for _, part := range st.Prompt {
+			promptArgs = append(promptArgs, strings.ReplaceAll(part, "{prompt}", prompt))
+		}
+	}
 
 	// Mint the conversation id here rather than discovering it later: known
 	// before the child exists, it lands in the record in the same write as
@@ -54,7 +129,9 @@ func cmdRun(a runArgs, harnessArgv []string) int {
 			sessionFlags = sessionArgv(conf.New, sid)
 		}
 	}
-	argv := concat(st.Command, st.Flags, sessionFlags, harnessArgs)
+	// The prompt goes last and stays out of harness_args: a restart resumes
+	// the conversation, it does not ask the first question again.
+	argv := concat(st.Command, st.Flags, sessionFlags, harnessArgs, promptArgs)
 
 	location := captureLocation(pane)
 	if location == nil {
@@ -62,19 +139,20 @@ func cmdRun(a runArgs, harnessArgv []string) int {
 	}
 	args := append([]string{}, harnessArgs...)
 	r := &Record{
-		Description: a.Description,
-		Profile:     harness,
-		Harness:     harness,
-		Command:     argv,
-		HarnessArgs: &args,
-		SessionIDs:  nonNil(sid),
-		Status:      "active",
-		Hostname:    hostname(),
-		Cwd:         cwd,
-		Tmux:        location,
-		StartedAt:   nowISO(),
+		Description:   a.Description,
+		Profile:       harness,
+		Harness:       harness,
+		Command:       argv,
+		HarnessArgs:   &args,
+		SessionIDs:    nonNil(sid),
+		Status:        "active",
+		Hostname:      hostname(),
+		Cwd:           cwd,
+		Tmux:          location,
+		StartedAt:     nowISO(),
+		InitialPrompt: prompt,
 	}
-	var want *wtRequest
+	want := many
 	if root != "" {
 		want = &wtRequest{Root: root, Repo: repoName(root), From: a.From, Detach: a.Detach}
 	}
@@ -281,13 +359,19 @@ func launch(r *Record, argv []string, st settings, want *wtRequest, dryRun bool)
 		}
 		if want != nil {
 			name := orDefault(slugify(r.desc()), r.ID)
-			planned := filepath.Join(st.Worktree.Base, name, want.Repo)
 			wt := st.Worktree.with(want.From, want.Detach)
 			how := "branch " + name
 			if wt.Detach {
 				how = "detached"
 			}
-			fmt.Println("worktree:", tilde(planned), fmt.Sprintf("(%s from %s, not created)", how, wt.From))
+			repos := want.Many
+			if len(repos) == 0 {
+				repos = []repoRef{{want.Root, want.Repo}}
+			}
+			for _, rr := range repos {
+				planned := filepath.Join(st.Worktree.Base, name, rr.Repo)
+				fmt.Println("worktree:", tilde(planned), fmt.Sprintf("(%s from %s, not created)", how, wt.From))
+			}
 		}
 		fmt.Println("cwd:    ", tilde(r.Cwd))
 		fmt.Println("tmux:   ", tmuxLabel(r))
@@ -375,6 +459,10 @@ func envList(env map[string]string) []string {
 // of the name; a failure here leaves a registered session with no harness
 // behind it, so it is closed off before dying.
 func makeSessionWorktree(r *Record, want *wtRequest, wt wtSettings) {
+	if len(want.Many) > 0 {
+		makeSessionWorktrees(r, want, wt)
+		return
+	}
 	name := sessionDirname(r)
 	base := filepath.Join(wt.Base, name)
 	dest := filepath.Join(base, want.Repo)
@@ -391,6 +479,33 @@ func makeSessionWorktree(r *Record, want *wtRequest, wt wtSettings) {
 	r.Worktree = &WorktreeRec{Base: base, Initial: dest, Branch: name, Root: want.Root}
 	recordWorktree(r.ID, base, dest, name, want.Root)
 	note("working in %s", tilde(dest))
+}
+
+// makeSessionWorktrees is --repos: a worktree of each repo, side by side
+// under the session directory, which is where the session then starts. It
+// is not itself a repo; Claude Code trusts it when worktree.base is trusted.
+func makeSessionWorktrees(r *Record, want *wtRequest, wt wtSettings) {
+	name := sessionDirname(r)
+	base := filepath.Join(wt.Base, name)
+	settings := wt.with(want.From, want.Detach)
+	func() {
+		defer func() {
+			if e := recover(); e != nil {
+				finish(r.ID, 1)
+				panic(e)
+			}
+		}()
+		for _, rr := range want.Many {
+			ensureWorktree(rr.Root, filepath.Join(base, rr.Repo), name, settings)
+		}
+	}()
+	r.Cwd = base
+	r.Worktree = &WorktreeRec{Base: base, Branch: name}
+	update(r.ID, func(s *Record) {
+		s.Cwd = base
+		s.Worktree = &WorktreeRec{Base: base, Branch: name}
+	})
+	note("working in %s (%d repos)", tilde(base), len(want.Many))
 }
 
 func finish(id string, code int) {

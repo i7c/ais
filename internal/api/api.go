@@ -7,7 +7,7 @@
 // types, so a rename here cannot pass unnoticed.
 //
 // Nullable fields (ended_at, exit_code, conversation, restart_of, fork_of,
-// pid) decode to their zero values, which is all a reader needs, and encode
+// pid, last_input_at) decode to their zero values, which is all a reader needs, and encode
 // back to null (Session.MarshalJSON), which is what ais promises.
 package api
 
@@ -52,30 +52,35 @@ type Profile struct {
 	Flags     []string `json:"flags"`
 	Resumable bool     `json:"resumable"`
 	Forkable  bool     `json:"forkable"`
+	// Prompts: the profile can be given a first message (ais run --prompt).
+	Prompts bool `json:"prompts"`
 }
 
 // Session is one recorded run.
 type Session struct {
-	ID            string         `json:"id"`
-	Profile       string         `json:"profile"`
-	Description   string         `json:"description"`
-	Name          string         `json:"name"`
-	Status        string         `json:"status"` // "active" or "dead"
-	Host          string         `json:"host"`
-	Cwd           string         `json:"cwd"`
-	Worktree      Worktree       `json:"worktree"`
-	Tmux          Location       `json:"tmux"`
-	PID           int            `json:"pid"`
-	StartedAt     string         `json:"started_at"`
-	EndedAt       string         `json:"ended_at"`
-	ExitCode      *int           `json:"exit_code"`
-	Conversation  string         `json:"conversation"`
-	Args          []string       `json:"args"`
-	RestartOf     string         `json:"restart_of"`
-	ForkOf        string         `json:"fork_of"`
-	CanRestart    bool           `json:"can_restart"`
-	CanResume     bool           `json:"can_resume"`
-	CanFork       bool           `json:"can_fork"`
+	ID           string   `json:"id"`
+	Profile      string   `json:"profile"`
+	Description  string   `json:"description"`
+	Name         string   `json:"name"`
+	Status       string   `json:"status"` // "active" or "dead"
+	Host         string   `json:"host"`
+	Cwd          string   `json:"cwd"`
+	Worktree     Worktree `json:"worktree"`
+	Tmux         Location `json:"tmux"`
+	PID          int      `json:"pid"`
+	StartedAt    string   `json:"started_at"`
+	EndedAt      string   `json:"ended_at"`
+	ExitCode     *int     `json:"exit_code"`
+	Conversation string   `json:"conversation"`
+	Args         []string `json:"args"`
+	RestartOf    string   `json:"restart_of"`
+	ForkOf       string   `json:"fork_of"`
+	CanRestart   bool     `json:"can_restart"`
+	CanResume    bool     `json:"can_resume"`
+	CanFork      bool     `json:"can_fork"`
+	// LastInputAt is when you last sent the harness a prompt (not counting
+	// the first one ais gave it); empty until you have.
+	LastInputAt   string         `json:"last_input_at"`
 	Notifications []Notification `json:"notifications"`
 }
 
@@ -128,6 +133,7 @@ func (s Session) MarshalJSON() ([]byte, error) {
 		Conversation *string `json:"conversation"`
 		RestartOf    *string `json:"restart_of"`
 		ForkOf       *string `json:"fork_of"`
+		LastInputAt  *string `json:"last_input_at"`
 	}{plain: plain(s)}
 	if s.PID != 0 {
 		out.PID = &s.PID
@@ -137,6 +143,7 @@ func (s Session) MarshalJSON() ([]byte, error) {
 	out.Conversation = nullable(s.Conversation)
 	out.RestartOf = nullable(s.RestartOf)
 	out.ForkOf = nullable(s.ForkOf)
+	out.LastInputAt = nullable(s.LastInputAt)
 	if out.Args == nil {
 		out.Args = []string{}
 	}

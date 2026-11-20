@@ -145,6 +145,9 @@ type sessionConf struct {
 }
 
 type settings struct {
+	// Prompt is how the harness takes its first message: argv with {prompt}
+	// in it, appended last. Empty when the profile cannot be given one.
+	Prompt       []string
 	Flags        []string
 	Env          map[string]string
 	Command      []string
@@ -184,6 +187,7 @@ func harnessSettings(cfg config, harness string) settings {
 		command = []string{harness}
 	}
 	return settings{
+		Prompt:       promptTemplate(specific, harness, command),
 		Flags:        flags,
 		Env:          env,
 		Command:      command,
@@ -191,6 +195,30 @@ func harnessSettings(cfg config, harness string) settings {
 		RenameWindow: renameWindowSetting(cfg),
 		Worktree:     worktreeSettings(cfg),
 	}
+}
+
+// builtinPrompt is the first-message template of the harnesses ais knows:
+// both take it as their last argument, after "--" so that a prompt starting
+// with "-" is not read as a flag. "/skill args" works as a first message in
+// claude (verified 2026-11-20).
+var builtinPrompt = []string{"--", "{prompt}"}
+
+// promptTemplate is [profile.<name>] prompt, else the built-in one for a
+// harness ais knows by name; prompt = [] turns it off.
+func promptTemplate(specific map[string]any, harness string, command []string) []string {
+	if v, ok := specific["prompt"]; ok {
+		tmpl := stringList(v, "prompt for "+harness)
+		if len(tmpl) > 0 && !anyContains(tmpl, "{prompt}") {
+			die("config: prompt for %s must contain {prompt} somewhere", harness)
+		}
+		return tmpl
+	}
+	for _, name := range []string{harness, filepath.Base(command[0])} {
+		if _, known := harnesses[filepath.Base(name)]; known {
+			return builtinPrompt
+		}
+	}
+	return nil
 }
 
 func renameWindowSetting(cfg config) bool {

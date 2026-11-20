@@ -262,6 +262,50 @@ func cmdSessionSeen(conversation string, verbose bool) (code int) {
 	return 0
 }
 
+// cmdActivity is the harness telling ais you sent it a prompt: claude's
+// UserPromptSubmit hook (payload on stdin) or pi's input event (--text). It
+// stamps last_input_at, which is how long a session has waited for you.
+//
+// The first prompt ais gave the session arrives through the same hook, but it
+// was ais typing, not you: the first submit whose text is that prompt only
+// marks it delivered. Like every hook, it never fails loudly.
+func cmdActivity(text *string) (code int) {
+	defer func() {
+		if e := recover(); e != nil {
+			code = 0
+		}
+	}()
+	prompt := ""
+	if text != nil {
+		prompt = *text
+	} else if !isTerminal(os.Stdin) {
+		raw, _ := io.ReadAll(os.Stdin)
+		var payload struct {
+			Prompt string `json:"prompt"`
+		}
+		if json.Unmarshal(raw, &payload) == nil {
+			prompt = payload.Prompt
+		}
+	}
+	sid := os.Getenv("AIS_SESSION")
+	if sid == "" || os.Getenv("AIS_SIBLING") != "" {
+		return 0
+	}
+	r := findID(readSessions(), sid)
+	if r == nil || r.Hostname != hostname() || !speaksFor(r) {
+		return 0
+	}
+	update(sid, func(s *Record) {
+		if s.InitialPrompt != "" && !s.InitialPromptSeen &&
+			strings.TrimSpace(prompt) == strings.TrimSpace(s.InitialPrompt) {
+			s.InitialPromptSeen = true
+			return
+		}
+		s.LastInputAt = nowISO()
+	})
+	return 0
+}
+
 // markSeen stamps seen_at on the unseen notifications, older than before, of
 // the sessions in panes; it returns the ids of those that had any. It reads
 // first and writes only if there is something to stamp: tmux runs this on
