@@ -1,6 +1,6 @@
 # Proposal: `ais flow` — planned, dispatched agent sessions
 
-Status: **agreed; steps 0–6 done** (2026-11-20)
+Status: **built; steps 0–7 done** (2026-11-20)
 
 ## 1. What this is for
 
@@ -528,10 +528,15 @@ Each step is one or two commits and usable on its own.
    - **Trust:** claude isn't started under a worktree base it doesn't
      trust.
    - **Install:** `ais flow install` writes and enables the timer.
-7. **Planner.**
-   - `ais flow plan` with the singleton and idle expiry.
-   - The plan timer.
-   - The `plan-sessions` skill.
+7. **Planner.** Done 2026-11-20.
+   - **`ais flow plan <ws>`:** runs from a timer per workspace. It starts a
+     planner when tickets are ready and none is open. It closes one that has
+     gone `idle_timeout` without your input, or whose session ended.
+   - **Deciding:** `ais flow plan done` ends a planner. A decided planner's
+     window closes after `close_after` (5 min) without input.
+   - **Workspace info:** `ais flow workspace` tells the planner which repos
+     it may propose.
+   - **The skill:** `plan-sessions` lives in `~/.agents/skills/`.
 8. **Live on soi.**
    - Mark two or three real tickets `ready` and run a week with `wip = 2`.
    - Then raise the limits.
