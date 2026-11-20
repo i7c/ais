@@ -1,6 +1,6 @@
 # Proposal: `ais flow` — planned, dispatched agent sessions
 
-Status: **reviewed, two questions open** (2026-11-20)
+Status: **agreed; spike done** (2026-11-20)
 
 ## 1. What this is for
 
@@ -119,10 +119,14 @@ Profiles gain one key, telling ais how to hand a harness its first prompt:
 
 ```toml
 [profile.claude]
-prompt = ["{prompt}"]     # claude "<prompt>" stays interactive
+prompt = ["--", "{prompt}"]   # claude "<prompt>" stays interactive
 [profile.pi]
-prompt = ["{prompt}"]     # pi "<msg>" likewise
+prompt = ["--", "{prompt}"]   # pi "<msg>" likewise
 ```
+
+The `--` keeps a prompt that starts with `-` from being read as a flag. A
+leading `/` is fine without it: `claude "/work-tickets <url>"` runs the skill
+with its arguments (verified, §17).
 
 A profile without `prompt` can't be dispatched with one; `ais flow` says so at
 `queue add`, not at 3 a.m.
@@ -250,7 +254,12 @@ weekday by default.
 - pi: the `input` event in the existing ais extension.
 
 `ais _activity` stamps `last_input_at` on the session record, and flow reads it
-from `ais state --json`. The initial prompt typed by flow doesn't count.
+from `ais state --json`.
+
+The initial prompt must not count, but `UserPromptSubmit` **does fire for it**
+(verified, §17). The hook payload carries the prompt text, so ais records the
+initial prompt on the session when it starts it. `_activity` ignores the first
+`UserPromptSubmit` whose `prompt` equals it, and counts every later one.
 
 ### What the planner does — skill `plan-sessions`
 
@@ -325,6 +334,16 @@ the last 5 minutes.
 3. The session directory `<worktree.base>/<name>/` becomes the cwd. It holds
    every repo as a subdirectory, so the agent sees all of them. Claude Code
    loads each repo's `CLAUDE.md` when it reads files there.
+
+   This directory is not a git repo, so Claude Code's **folder-trust dialog**
+   would stop an unattended start (§17). It does not appear when
+   `worktree.base` itself is trusted, because trust covers everything below a
+   folder. `ais flow install` checks for that, and `ais flow start` refuses to
+   launch without it. Neither writes Claude's state file: the fix is to run
+   `claude` once in `~/wt` and accept. The alternative layout, starting in
+   the first repo with `--add-dir` for the others, also needs no dialog,
+   because each worktree inherits its main checkout's trust. It is the
+   fallback if the session-directory layout misbehaves.
 4. Build the prompt from `workspace.session.prompt`. It fills in `{tickets}`
    and `{notes}`, and appends a short block listing repo → path → branch.
 5. Exec `ais run <profile> --cwd <dir> -d <title> -- <prompt argv>`. ais
@@ -453,10 +472,7 @@ proven itself.
 
 Each step is one or two commits and usable on its own.
 
-0. **Spike (½ day).** Settle the two open facts before writing code:
-   - Does `claude "/work-tickets <url>"` invoke the skill?
-   - Does a `UserPromptSubmit` hook fire for typed prompts but not for the
-     positional initial prompt?
+0. **Spike.** Done 2026-11-20, results in §17.
 1. **Acceptance suite.**
    - Go tests that drive the `ais` CLI as a black box: run, ls/state/env,
      notify and its sink, wt add/ls/path/prune, restart, fork, name, install
@@ -510,11 +526,35 @@ Each step is one or two commits and usable on its own.
   slot, and nothing else does.
 - Language: Go, porting ais first (§13).
 
-## 16. Still open
+## 16. Settled after review
 
-1. **What abandoning means on GitHub.** Default: close the issue as *not
-   planned* with a one-line reason. An alternative is a separate project
-   Status such as `abandoned` that keeps the issue open.
-2. **The planner schedule.** Default: weekdays at 09:00 and 14:00. Since the
-   pile of ready tickets rarely empties, this is effectively how often a
-   planner asks for me.
+- Abandoning closes the issue as *not planned*, with a one-line reason.
+- The planner schedule is weekdays at 09:00 and 14:00.
+
+## 17. Spike results (2026-11-20)
+
+These were run on a lab tmux server (`tmux -L flowspike`) with Claude Code
+2.1.327. A throwaway skill wrote a marker file, and `--settings` added a hook
+that logged every event.
+
+| Question | Result |
+|---|---|
+| Does `claude "/spike-mark alpha-42"` invoke the skill and stay interactive? | **Yes.** The skill ran with `$ARGUMENTS = alpha-42`, then the session waited at the prompt. |
+| Does `UserPromptSubmit` fire for the positional first prompt? | **Yes**, with `prompt` = the exact text. A prompt typed later fires it again with its own text. So idle tracking must skip the first one (§8). |
+| `Stop` | Fired within ~1 s of each reply finishing. This is the fast "waiting for me" signal. |
+| `Notification` | `idle_prompt` ("Claude is waiting for your input") fired 60 s after `Stop`. |
+| `SessionStart` | `source: startup` before the first prompt. |
+| Trust dialog in a new non-repo folder | **Blocks the start**, even with `--dangerously-skip-permissions`. The first prompt is not processed until it is answered. |
+| Trust in a subfolder of a trusted folder | No dialog. |
+| Trust in a git worktree of a trusted repo | No dialog. This is why `ais -w` sessions under `~/wt` never asked. |
+| Trust in a new session folder under a trusted base | No dialog, once the base was accepted. |
+| `--add-dir` of an untrusted folder | Dialog. `--add-dir` of a worktree of a trusted repo: no dialog. |
+| pi | Not run, to avoid billing its provider. Its help shows `pi [options] [--] [@files...] [messages...]`, an interactive initial prompt, and `--skill <path>`. Whether a `/skill:` first message works is unverified. |
+
+Follow-ups this creates:
+
+- On agalloch `~/wt` has **no** trust entry today. Before the first dispatch,
+  run `claude` once in `~/wt` and accept. `ais flow install` checks for it.
+- The `Stop` and `idle_prompt` hooks are enough to give every session a
+  working/waiting state, the `@ais_state` the tsm plan left for later. flow
+  doesn't need it yet, but the same hooks would make it cheap.
