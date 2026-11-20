@@ -481,8 +481,13 @@ Each step is one or two commits and usable on its own.
      (never `TMUX_TMPDIR`), with a fake harness script standing in for claude
      and pi.
    - Green against today's Python ais.
-2. **Module restructure.** Move tsm to `cmd/tsm` and extract `internal/api`
-   and `internal/tmux`. No behaviour change, and tsm's tests stay green.
+2. **Module restructure.** Done 2026-11-20.
+   - tsm moved to `cmd/tsm` in the root module. Build it with
+     `go build ./cmd/tsm`.
+   - The JSON contract types moved to `internal/api`, which tsm uses through
+     type aliases.
+   - `internal/tmux` is deferred to step 3. tsm's tmux wrapper is tied to its
+     snapshot types, so it gets a shared core only once ais needs one.
 3. **Port ais to Go.**
    - Command by command, until the acceptance suite is green against the Go
      binary.

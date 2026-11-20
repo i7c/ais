@@ -404,7 +404,7 @@ func (m *model) hot(r Row, now time.Time) bool {
 	}
 	for _, w := range r.Session.Windows {
 		for _, p := range w.Panes {
-			if a := st.ForPane(p); a != nil && a.NotifiedRecently(window, now) {
+			if a := aisForPane(st, p); a != nil && a.NotifiedRecently(window, now) {
 				return true
 			}
 		}
