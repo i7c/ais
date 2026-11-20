@@ -178,7 +178,7 @@ func (rl *relay) session(r Remote) (heard bool, err error) {
 		}
 		rl.mu.Unlock()
 	}()
-	if err := w.send(wire{Type: "hello", Proto: proto, Since: loadSince(name)}); err != nil {
+	if err := w.send(wire{Type: "hello", Proto: proto, Since: loadSince(name), Caps: []string{capCompose}}); err != nil {
 		return false, err
 	}
 	dec := json.NewDecoder(bufio.NewReader(stdout))

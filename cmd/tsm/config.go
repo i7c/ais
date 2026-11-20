@@ -19,6 +19,15 @@ import (
 //	tsm = "tsm"             # the tsm to run there
 type Config struct {
 	Remotes []RemoteConf `toml:"remote"`
+	Compose ComposeConf  `toml:"compose"`
+}
+
+// ComposeConf is [compose]: how "tsm compose" edits.
+//
+//	[compose]
+//	editor = "nvim"   # tmux's global environment often has no $EDITOR
+type ComposeConf struct {
+	Editor string `toml:"editor"`
 }
 
 type RemoteConf struct {

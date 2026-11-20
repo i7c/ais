@@ -28,7 +28,8 @@ const usage = `usage: tsm                open the manager (made for a tmux popup
                           a harness's EDITOR: write the prompt in a split
                           beside the agent (on the topmost tmux), then paste
                           it back into the prompt box; the real editor is
-                          $TSM_EDITOR, else $VISUAL/$EDITOR, else vi
+                          $TSM_EDITOR, else [compose] editor, else
+                          $VISUAL/$EDITOR, else nvim/vim/vi
 
   bind-key a display-popup -E -w 90% -h 80% -T " tsm " "tsm"
   set -g status-right '#(tsm status --pane #{pane_id}) %H:%M'

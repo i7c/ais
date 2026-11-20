@@ -66,14 +66,23 @@ func isPromptFile(path string) bool {
 	return false
 }
 
-// realEditor is the editor to actually edit in: $TSM_EDITOR, else $VISUAL or
-// $EDITOR unless that is this hook, else vi.
+// realEditor is the editor to actually edit in: $TSM_EDITOR, else [compose]
+// editor, else $VISUAL or $EDITOR unless that is this hook, else the first
+// of nvim, vim and vi there is.
 func realEditor() string {
 	if e := os.Getenv("TSM_EDITOR"); e != "" {
 		return e
 	}
+	if conf, err := LoadConfig(); err == nil && conf.Compose.Editor != "" {
+		return conf.Compose.Editor
+	}
 	for _, k := range []string{"VISUAL", "EDITOR"} {
 		if e := os.Getenv(k); e != "" && !strings.Contains(e, "compose") {
+			return e
+		}
+	}
+	for _, e := range []string{"nvim", "vim"} {
+		if _, err := exec.LookPath(e); err == nil {
 			return e
 		}
 	}

@@ -325,8 +325,10 @@ and read the agent while you write. Save and quit, and the text is pasted
 into the prompt box as one bracketed paste — not sent; you press enter there.
 Quit with an empty file to send nothing.
 
-- The real editor is `$TSM_EDITOR`, else `$VISUAL`/`$EDITOR` (unless that is
-  the hook), else `vi`.
+- The real editor is `$TSM_EDITOR`, else `editor` under `[compose]` in
+  `~/.config/tsm/config.toml`, else `$VISUAL`/`$EDITOR` (unless that is the
+  hook), else the first of nvim, vim, vi. The split runs in tmux's global
+  environment, which often has no `$EDITOR`: say it in the config.
 - Only the prompt box goes to the split (claude's `claude-prompt-*.md`, pi's
   `pi-editor-*/prompt.md`). Any other file — claude's `/memory` opening
   CLAUDE.md — is edited in place by the real editor, as before.

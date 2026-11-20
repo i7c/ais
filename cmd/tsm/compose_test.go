@@ -1,8 +1,12 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
+	"fmt"
+	"io"
 	"testing"
+	"time"
 )
 
 func TestIsPromptFile(t *testing.T) {
@@ -32,6 +36,8 @@ func TestTargetRoundTrip(t *testing.T) {
 }
 
 func TestRealEditorSkipsTheHook(t *testing.T) {
+	t.Setenv("TSM_CONFIG", t.TempDir()+"/none.toml")
+	t.Setenv("PATH", t.TempDir())
 	t.Setenv("TSM_EDITOR", "")
 	t.Setenv("VISUAL", "tsm compose --hook")
 	t.Setenv("EDITOR", "nvim")
@@ -59,5 +65,58 @@ func TestSockMsg(t *testing.T) {
 	json.Unmarshal([]byte(`{"compose":{"id":"c1","host":"h","pane":"%0","text":"x"}}`), &c)
 	if c.Compose == nil || c.Compose.Pane != "%0" {
 		t.Errorf("a compose decoded as %+v", c)
+	}
+}
+
+// A compose goes up only to a relay that said it takes them; an older one
+// is answered "declined" at once, not after a timeout.
+func TestAComposeGoesUpOnlyToARelayThatTakesThem(t *testing.T) {
+	for _, caps := range [][]string{nil, {capCompose}} {
+		t.Run(fmt.Sprint(caps), func(t *testing.T) {
+			t.Setenv("XDG_RUNTIME_DIR", shortTemp(t))
+			t.Setenv("XDG_CACHE_HOME", t.TempDir())
+			tm := Tmux{r: &fakeRunner{reply: func([]string) string { return "" }}}
+			upR, upW := io.Pipe()
+			downR, downW := io.Pipe()
+			defer downW.Close()
+			go serveRelay(tm, aisWith(""), downR, upW)
+			msgs := make(chan wire, 16)
+			go func() {
+				dec := json.NewDecoder(bufio.NewReader(upR))
+				for {
+					var m wire
+					if dec.Decode(&m) != nil {
+						return
+					}
+					msgs <- m
+				}
+			}()
+			enc := json.NewEncoder(downW)
+			enc.Encode(wire{Type: "hello", Caps: caps})
+			for m := range msgs { // the hello is in once the replay is out
+				if m.Type == "replay" {
+					break
+				}
+			}
+			go func() {
+				for m := range msgs {
+					if m.Type == "compose" {
+						enc.Encode(wire{Type: "ack", ID: m.Compose.ID, Result: composeOpened})
+					}
+				}
+			}()
+			start := time.Now()
+			got := offerCompose(Compose{ID: "c1", Host: "h", Pane: "%0"})
+			want := ""
+			if caps != nil {
+				want = composeOpened
+			}
+			if got != want {
+				t.Fatalf("offerCompose = %q, want %q", got, want)
+			}
+			if time.Since(start) > time.Second {
+				t.Fatalf("took %v", time.Since(start))
+			}
+		})
 	}
 }

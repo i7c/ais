@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -31,7 +32,12 @@ type wire struct {
 	Payload *Payload `json:"payload,omitempty"`
 	Pane    string   `json:"pane,omitempty"` // seen: the pane you have been looking at
 	Compose *Compose `json:"compose,omitempty"`
+	// Caps (hello) is what the relay above understands beyond notes: an
+	// older one would sit on a compose until it timed out.
+	Caps []string `json:"caps,omitempty"`
 }
+
+const capCompose = "compose"
 
 // sockMsg is what comes in on the relay socket: a note from ais, or a
 // compose from "tsm compose --hook".
@@ -96,6 +102,7 @@ func serveRelay(t Tmux, a Ais, in io.Reader, out io.Writer) int {
 
 	var mu sync.Mutex
 	waiting := map[string]chan string{}
+	canCompose := false // the relay above said it takes composes (under mu)
 
 	done := make(chan struct{})
 	go func() {
@@ -108,6 +115,9 @@ func serveRelay(t Tmux, a Ais, in io.Reader, out io.Writer) int {
 			}
 			switch m.Type {
 			case "hello":
+				mu.Lock()
+				canCompose = slices.Contains(m.Caps, capCompose)
+				mu.Unlock()
 				notes, since := replay(a, m.Since)
 				w.send(wire{Type: "replay", Notes: notes, Since: since})
 			case "seen":
@@ -143,6 +153,13 @@ func serveRelay(t Tmux, a Ais, in io.Reader, out io.Writer) int {
 				m := wire{Type: "notify", Note: &n}
 				result, wait := resultUndelivered, ackWait
 				if in.Compose != nil {
+					mu.Lock()
+					ok := canCompose
+					mu.Unlock()
+					if !ok {
+						json.NewEncoder(conn).Encode(map[string]string{"result": composeDeclined})
+						return
+					}
 					n.ID = in.Compose.ID
 					m = wire{Type: "compose", Compose: in.Compose}
 					result, wait = composeDeclined, composeWait
