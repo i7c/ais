@@ -865,6 +865,15 @@ class WorktreeStart(unittest.TestCase):
         _, at = self.make(**{"from": "refs/remotes/upstream/foo-bar"})
         self.assertEqual(at, fresh)
 
+    def test_explicit_remote_head_can_be_fetched_before_it_has_a_local_alias(self):
+        fresh = self.pushed_elsewhere("new remote main")
+        ais.git("-C", str(self.repo.path), "symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
+        _, at = self.make(**{"from": "origin/HEAD"})
+        self.assertEqual(at, fresh)
+        self.repo.git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+        _, at = self.make("t", **{"from": "origin/HEAD"})
+        self.assertEqual(at, fresh)
+
     def test_remote_shorthand_and_remote_names_with_slashes(self):
         fresh = self.push_branch_elsewhere("feature")
         self.repo.git("remote", "rename", "origin", "team/upstream")

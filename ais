@@ -1390,7 +1390,11 @@ def ensure_worktree(root: Path, dest: Path, branch: str, settings: dict) -> Path
     if settings["fetch"] and remote:
         fetch_args = []
         if qualified:
-            source = f"refs/heads/{qualified[1]}"
+            # A clone need not have origin/HEAD recorded yet. Fetch the
+            # remote's HEAD directly in that case, rather than a branch
+            # literally called HEAD. Existing symbolic aliases were resolved
+            # by explicit_remote to their named branch.
+            source = "HEAD" if qualified[1] == "HEAD" else f"refs/heads/{qualified[1]}"
             target = f"refs/remotes/{remote}/{qualified[1]}"
             fetch_args = [f"+{source}:{target}"]
         res = git("-C", str(root), "fetch", "--quiet", remote, *fetch_args)
