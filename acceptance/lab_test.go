@@ -608,3 +608,5 @@ func killHard(t *testing.T, pid string) {
 		t.Fatalf("kill %s: %v %s", pid, err, out)
 	}
 }
+
+func removeFile(path string) error { return os.Remove(path) }

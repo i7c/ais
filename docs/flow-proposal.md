@@ -473,7 +473,7 @@ proven itself.
 Each step is one or two commits and usable on its own.
 
 0. **Spike.** Done 2026-11-20, results in §17.
-1. **Acceptance suite.**
+1. **Acceptance suite.** Done 2026-11-20: `acceptance/`, see its README.
    - Go tests that drive the `ais` CLI as a black box: run, ls/state/env,
      notify and its sink, wt add/ls/path/prune, restart, fork, name, install
      (dry run), and the hook entry points.
