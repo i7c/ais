@@ -9,7 +9,7 @@
 // what callers depend on — exit codes, stdout, the JSON API, files, tmux
 // state — and avoids pinning the wording of messages meant for people.
 //
-//	go test ./acceptance/                 # against ../ais
+//	go test ./acceptance/                 # against cmd/ais, built for the run
 //	AIS_BIN=/path/to/ais go test ./acceptance/
 package acceptance
 
@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -42,7 +43,8 @@ type Lab struct {
 	windows int
 }
 
-// aisUnderTest is the ais to test: $AIS_BIN, else the one in this checkout.
+// aisUnderTest is the ais to test: $AIS_BIN, else cmd/ais of this checkout,
+// built once per test run.
 func aisUnderTest(t *testing.T) string {
 	if bin := os.Getenv("AIS_BIN"); bin != "" {
 		abs, err := filepath.Abs(bin)
@@ -51,9 +53,31 @@ func aisUnderTest(t *testing.T) string {
 		}
 		return abs
 	}
-	_, here, _, _ := runtime.Caller(0)
-	return filepath.Join(filepath.Dir(here), "..", "ais")
+	buildOnce.Do(func() {
+		dir, err := os.MkdirTemp("", "aisacc-bin-")
+		if err != nil {
+			buildErr = err
+			return
+		}
+		built = filepath.Join(dir, "ais")
+		_, here, _, _ := runtime.Caller(0)
+		cmd := exec.Command("go", "build", "-o", built, "./cmd/ais")
+		cmd.Dir = filepath.Join(filepath.Dir(here), "..")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			buildErr = fmt.Errorf("go build ./cmd/ais: %v\n%s", err, out)
+		}
+	})
+	if buildErr != nil {
+		t.Fatal(buildErr)
+	}
+	return built
 }
+
+var (
+	buildOnce sync.Once
+	built     string
+	buildErr  error
+)
 
 func testdata(name string) string {
 	_, here, _, _ := runtime.Caller(0)

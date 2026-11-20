@@ -1,17 +1,18 @@
 # ais acceptance suite
 
-Black-box tests of the `ais` command line. They are the contract a port of ais
-(to Go, `docs/flow-proposal.md` §13) has to meet, so they assert what callers
+Black-box tests of the `ais` command line. They were written against the
+Python ais and are the contract the Go port met (`docs/flow-proposal.md` §13);
+they assert what callers
 depend on: exit codes, stdout, the `ais state` / `ais env` JSON API (api 1),
 `sessions.json` (version 1), files, git state and tmux state. They avoid
 pinning messages meant for people.
 
 ```
-go test ./acceptance/                      # against ../ais (the Python one today)
+go test ./acceptance/                      # against cmd/ais, built for the run
 AIS_BIN=/path/to/ais go test ./acceptance/ # against another build
 ```
 
-About 40 s on agalloch. Needs tmux, git, bash and `script` (util-linux).
+About 15 s on agalloch. Needs tmux, git, bash and `script` (util-linux).
 
 ## Isolation
 

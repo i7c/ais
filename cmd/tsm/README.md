@@ -306,6 +306,6 @@ there when it ends.
 ## Speed
 
 The popup draws its first frame from the tmux query alone, ~13ms after the
-key; `ais state` (~90ms of Python) fills in the agent details just after.
+key; `ais state` (~20ms) fills in the agent details just after.
 `go.mod` pins `go-runewidth` at v0.0.31 for this: older releases build width
 tables for every code point at startup, which alone cost ~40ms.
