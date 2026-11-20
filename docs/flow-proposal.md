@@ -1,6 +1,6 @@
 # Proposal: `ais flow` — planned, dispatched agent sessions
 
-Status: **agreed; spike done** (2026-11-20)
+Status: **agreed; steps 0–4 done** (2026-11-20)
 
 ## 1. What this is for
 
@@ -496,11 +496,15 @@ Each step is one or two commits and usable on its own.
      agalloch and karif, and delete the Python.
    - `internal/tmux` stays deferred: ais's tmux helpers are small, and
      tsm's are tied to its snapshot types.
-4. **ais groundwork for flow.**
-   - The `prompt` key on profiles and `ais run --prompt-file`.
-   - `ais _activity` with its claude and pi hooks; `last_input_at` in
-     `ais state`.
-   - `ais run --repos a,b,c` to make all the worktrees up front.
+4. **ais groundwork for flow.** Done 2026-11-20.
+   - **First prompts:** `ais run --prompt` / `--prompt-file` use a
+     profile `prompt` template. claude and pi have `-- {prompt}` built in,
+     and `ais state` reports which profiles take a prompt.
+   - **Your last input:** `ais _activity` stamps `last_input_at`, skipping
+     the first prompt ais gave. It is wired to claude's `UserPromptSubmit`
+     and pi's `input` by `ais install`. Verified with real claude.
+   - **Multi-repo starts:** `ais run --repos a,b` makes one worktree per
+     repo under the session directory.
 5. **flow core.**
    - `flow.db` and the `[workspace]` config.
    - The GitHub project source: read, write, id cache.
