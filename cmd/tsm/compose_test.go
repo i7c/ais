@@ -24,7 +24,7 @@ func TestIsPromptFile(t *testing.T) {
 }
 
 func TestTargetRoundTrip(t *testing.T) {
-	for _, c := range []struct{ remote, pane string }{{"", "%3"}, {"karif", "%12"}, {"a:b", "%1"}} {
+	for _, c := range []struct{ remote, pane string }{{"", "%3"}, {"karif", "%12"}, {"agalloch", "karif:%1"}} {
 		r, p := splitTarget(target(c.remote, c.pane))
 		if r != c.remote || p != c.pane {
 			t.Errorf("round trip of %q %q gave %q %q", c.remote, c.pane, r, p)
@@ -32,6 +32,9 @@ func TestTargetRoundTrip(t *testing.T) {
 	}
 	if draftKey("", "%3") == draftKey("karif", "%3") {
 		t.Error("a local and a remote pane share a draft")
+	}
+	if got := draftKey("agalloch", "karif:%5"); got != "agalloch-karif-5" {
+		t.Errorf("draftKey = %q", got)
 	}
 }
 
@@ -106,7 +109,7 @@ func TestAComposeGoesUpOnlyToARelayThatTakesThem(t *testing.T) {
 				}
 			}()
 			start := time.Now()
-			got := offerCompose(Compose{ID: "c1", Host: "h", Pane: "%0"})
+			got := offerCompose(Compose{ID: "c1", Host: "h", Pane: "%0"}, composeWait)
 			want := ""
 			if caps != nil {
 				want = composeOpened

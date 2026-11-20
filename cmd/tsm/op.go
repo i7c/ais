@@ -118,6 +118,10 @@ func Exec(acts Actions, st *AisState, op Op) (Outcome, error) {
 		return Outcome{Status: fmt.Sprintf("moved — %d change(s) made", done)}, nil
 	}
 	if op.Action == "paste" {
+		if remote, _ := splitTarget(op.Pane); remote != "" {
+			// Not ours: the way down to a remote's pane, one hop further.
+			return Outcome{Status: "pasted"}, sendDraft(acts.tmux, op.Pane, op.Text)
+		}
 		if acts.snap.Pane(op.Pane) == nil {
 			return Outcome{}, fmt.Errorf("pane %s is gone", op.Pane)
 		}

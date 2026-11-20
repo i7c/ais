@@ -337,8 +337,11 @@ Quit with an empty file to send nothing.
 - The draft lives in `~/.cache/tsm/drafts/` until it has arrived. If the
   remote is gone when you quit, the split offers retry, edit again, or quit;
   the next `^g` for that agent starts from the kept draft.
-- Without a relay above (or one that cannot show the agent), the split opens
-  on the agent's own tmux.
+- It goes up the relays as far as there is a tmux with a pane that reaches
+  the host below (Mac → agalloch → karif: the Mac's), and the paste comes
+  back down the same way. A relay outside tmux (launchd) still reaches the
+  default tmux server. With no relay above, the split opens on the agent's
+  own tmux.
 
 ## Speed
 

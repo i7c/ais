@@ -162,7 +162,7 @@ func serveRelay(t Tmux, a Ais, in io.Reader, out io.Writer) int {
 					}
 					n.ID = in.Compose.ID
 					m = wire{Type: "compose", Compose: in.Compose}
-					result, wait = composeDeclined, composeWait
+					result, wait = composeDeclined, composeAckFor
 				} else if n.Host == "" {
 					n.Host = hostname()
 				}

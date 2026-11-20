@@ -28,8 +28,12 @@ import (
 type Compose struct {
 	ID   string `json:"id"`
 	Host string `json:"host"`
+	// Pane is the agent's pane as the host it is offered to names it: a
+	// pane id on Host, or, once it has passed a relay, the way down to it
+	// ("karif:%5" from the host above karif).
 	Pane string `json:"pane"`
 	Text string `json:"text"`
+	Hops int    `json:"hops,omitempty"`
 }
 
 const (
@@ -37,8 +41,13 @@ const (
 	composeFocused  = "focused" // one was open already: the box keeps its text
 	composeDeclined = "declined"
 	// composeWait bounds how long the hook waits on the hosts above: a
-	// harness is frozen until it returns.
-	composeWait = 3 * time.Second
+	// harness is frozen until it returns. The relay that answers it waits
+	// less on the hosts above it in turn, and opens the editor itself if
+	// they have not taken it by then.
+	composeWait   = 5 * time.Second
+	composeAckFor = composeWait - 500*time.Millisecond // a serving relay, on the one above
+	composeUpFor  = 2 * time.Second                    // a relay, on the hosts above it
+
 )
 
 func cmdCompose(t Tmux, args []string) int {
@@ -109,7 +118,7 @@ func composeHook(t Tmux, file string) int {
 		return 1
 	}
 	c := Compose{ID: newID(), Host: hostname(), Pane: pane, Text: string(data)}
-	result := offerCompose(c)
+	result := offerCompose(c, composeWait)
 	if result == "" {
 		var err error
 		if result, err = openCompose(t, pane, "", c); err != nil {
@@ -148,13 +157,13 @@ func newID() string {
 
 // offerCompose hands a compose to the relay above, if one is connected, and
 // says what a host up there did with it: "" if none took it.
-func offerCompose(c Compose) string {
+func offerCompose(c Compose, wait time.Duration) string {
 	conn, err := net.DialTimeout("unix", relaySocket(), 500*time.Millisecond)
 	if err != nil {
 		return ""
 	}
 	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(composeWait))
+	conn.SetDeadline(time.Now().Add(wait))
 	if json.NewEncoder(conn).Encode(sockMsg{Compose: &c}) != nil {
 		return ""
 	}
@@ -171,7 +180,8 @@ func offerCompose(c Compose) string {
 	return ""
 }
 
-// A target is where a draft goes back to: a pane here, or on a remote.
+// A target is where a draft goes back to: a pane here ("%5"), or the way to
+// one through the remotes ("karif:%5", "agalloch:karif:%5").
 func target(remote, pane string) string {
 	if remote == "" {
 		return pane
@@ -179,9 +189,14 @@ func target(remote, pane string) string {
 	return remote + ":" + pane
 }
 
+// splitTarget takes the first remote off a target: the rest is the pane as
+// that remote names it.
 func splitTarget(to string) (remote, pane string) {
-	if i := strings.LastIndex(to, ":%"); i >= 0 {
-		return to[:i], to[i+1:]
+	if strings.HasPrefix(to, "%") {
+		return "", to
+	}
+	if r, p, ok := strings.Cut(to, ":"); ok {
+		return r, p
 	}
 	return "", to
 }
@@ -191,7 +206,7 @@ func draftKey(remote, pane string) string {
 	if host == "" {
 		host = "local"
 	}
-	return slug(host) + "-" + strings.TrimPrefix(pane, "%")
+	return slug(host + " " + pane)
 }
 
 func draftPath(key string) string { return filepath.Join(cacheDir(), "drafts", key+".md") }
@@ -335,13 +350,11 @@ func (t Tmux) Paste(pane, text string) error {
 	return err
 }
 
-// compose is what the relay does with a compose that came up from a remote:
-// open it here, beside the pane that reaches that remote, if this tmux is
-// where you are looking at it.
+// compose is what the relay does with a compose that came up from a remote,
+// if a pane in this tmux reaches that remote: offer it further up, to a
+// host whose tmux reaches this one, and open it here only if none takes it.
+// The topmost tmux is the one at your fingers.
 func (rl *relay) compose(c Compose, from RemoteConf) string {
-	if !rl.inTmux {
-		return composeDeclined
-	}
 	snap, err := rl.tmux.Snapshot()
 	if err != nil {
 		return composeDeclined
@@ -349,6 +362,13 @@ func (rl *relay) compose(c Compose, from RemoteConf) string {
 	hosting := hostingPane(snap, from)
 	if hosting == nil {
 		return composeDeclined
+	}
+	if c.Hops < maxHops {
+		up := c
+		up.Pane, up.Hops = target(from.Name, c.Pane), c.Hops+1
+		if result := offerCompose(up, composeUpFor); result != "" {
+			return result
+		}
 	}
 	result, err := openCompose(rl.tmux, hosting.ID, from.Name, c)
 	if err != nil {
