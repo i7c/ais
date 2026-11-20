@@ -30,6 +30,7 @@ type WireSpec struct {
 	Dir      string    `json:"dir"`
 	Worktree bool      `json:"worktree"`
 	From     string    `json:"from,omitempty"`
+	Fetch    *bool     `json:"fetch,omitempty"`
 	Detach   *bool     `json:"detach,omitempty"`
 	Place    Placement `json:"place"`
 	About    string    `json:"about"`
@@ -38,7 +39,7 @@ type WireSpec struct {
 
 func (c CreateSpec) Wire() *WireSpec {
 	w := &WireSpec{
-		Profile: c.Profile, Dir: c.Dir, Worktree: c.Worktree, From: c.From, Detach: c.Detach,
+		Profile: c.Profile, Dir: c.Dir, Worktree: c.Worktree, From: c.From, Fetch: c.Fetch, Detach: c.Detach,
 		Place: c.Place, About: c.About,
 	}
 	if c.Anchor != nil {
@@ -122,7 +123,7 @@ func Exec(acts Actions, st *AisState, op Op) (Outcome, error) {
 		}
 		c := op.Create
 		spec := CreateSpec{
-			Profile: c.Profile, Dir: c.Dir, Worktree: c.Worktree, From: c.From, Detach: c.Detach,
+			Profile: c.Profile, Dir: c.Dir, Worktree: c.Worktree, From: c.From, Fetch: c.Fetch, Detach: c.Detach,
 			Place: c.Place, About: c.About,
 		}
 		if c.Anchor != "" {

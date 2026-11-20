@@ -20,7 +20,8 @@ type CreateSpec struct {
 	Profile  string // shellProfile for a plain shell
 	Dir      string
 	Worktree bool   // give an ais session a worktree of its own (-w)
-	From     string // what the worktree starts at (--from); "" leaves it to ais
+	From     string // mode or Git commit-ish (--from); "" leaves it to ais
+	Fetch    *bool  // override worktree.fetch (--[no-]fetch); nil uses config
 	Detach   *bool  // a detached worktree (--[no-]detach); nil leaves it to ais
 	Place    Placement
 	About    string // ais -d; for a shell, the window or session name
@@ -38,6 +39,11 @@ func (c CreateSpec) Argv(ais string) []string {
 		argv = append(argv, "-w")
 		if c.From != "" {
 			argv = append(argv, "--from", c.From)
+		}
+		if c.Fetch != nil && *c.Fetch {
+			argv = append(argv, "--fetch")
+		} else if c.Fetch != nil {
+			argv = append(argv, "--no-fetch")
 		}
 		if c.Detach != nil && *c.Detach {
 			argv = append(argv, "--detach")
@@ -329,11 +335,17 @@ func FilterPlaces(places []Place, query string) []Place {
 // The last choices, so the next "n" offers the same again: a per-user
 // convenience, nothing depends on it surviving.
 type lastCreate struct {
-	Profile  string    `json:"profile"`
-	Place    Placement `json:"place"`
-	Worktree *bool     `json:"worktree,omitempty"`
-	From     string    `json:"from,omitempty"`
-	Detach   *bool     `json:"detach,omitempty"`
+	Profile  string             `json:"profile"`
+	Place    Placement          `json:"place"`
+	Worktree *bool              `json:"worktree,omitempty"`
+	From     string             `json:"from,omitempty"`
+	Detach   *bool              `json:"detach,omitempty"`
+	Refs     map[string]lastRef `json:"refs,omitempty"` // host + repo directory
+}
+
+type lastRef struct {
+	Ref   string `json:"ref"`
+	Fetch bool   `json:"fetch"`
 }
 
 func lastCreatePath() string { return filepath.Join(cacheDir(), "last-create.json") }

@@ -17,6 +17,8 @@ const (
 	fWhere
 	fWorktree
 	fFrom
+	fRef
+	fFetch
 	fDetach
 	fPlace
 	fAbout
@@ -32,7 +34,10 @@ var wtFroms = []struct{ name, what string }{
 	{"origin", "origin/main, freshly fetched"},
 	{"local", "main as this checkout has it"},
 	{"head", "whatever this checkout has out"},
+	{"ref", "an exact Git ref or commit-ish"},
 }
+
+const wtRef = 4 // the custom-ref choice is not itself an ais mode
 
 func wtFromIndex(name string) (int, bool) {
 	for i, f := range wtFroms {
@@ -54,7 +59,9 @@ type createForm struct {
 	where    textinput.Model
 	pick     int
 	worktree bool
-	from     int  // into wtFroms
+	from     int // into wtFroms
+	ref      textinput.Model
+	fetch    bool
 	detach   bool // a detached worktree rather than a branch
 	place    int
 	about    textinput.Model
@@ -64,9 +71,15 @@ type createForm struct {
 	auto     bool  // ais worktree.auto: the default for a repo
 	// ais worktree.from and .detach, what it does when not told; hostFrom
 	// is empty from an ais that cannot be told, which hides both choices.
-	hostFrom   string
-	hostDetach bool
-	err        string
+	hostFrom     string
+	hostDetach   bool
+	hostFetch    bool
+	supportsRefs bool
+	hostName     string
+	refScope     string
+	refMemory    map[string]lastRef
+	preferRef    bool
+	err          string
 }
 
 // places are the directories to offer, or nil to look for them here.
@@ -77,13 +90,20 @@ func newCreateForm(snap *Snapshot, st *AisState, anchor *Pane, aisOK bool, place
 			f.profiles = append(f.profiles, p.Name)
 		}
 		f.auto = st.Worktree.Auto
-		if _, ok := wtFromIndex(st.Worktree.From); ok {
+		f.supportsRefs, f.hostFetch = st.Worktree.SupportsRefs, st.Worktree.Fetch
+		f.hostName = st.Host
+		if i, ok := wtFromIndex(st.Worktree.From); (ok && i != wtRef) || f.supportsRefs {
 			f.hostFrom, f.hostDetach = st.Worktree.From, st.Worktree.Detach
 		}
 	}
 	f.profiles = append(f.profiles, shellProfile)
 
 	last := loadLastCreate()
+	f.refMemory = last.Refs
+	if f.refMemory == nil {
+		f.refMemory = map[string]lastRef{}
+	}
+	f.preferRef = last.From == "ref"
 	for i, p := range f.profiles {
 		if p == last.Profile {
 			f.what = i
@@ -93,8 +113,8 @@ func newCreateForm(snap *Snapshot, st *AisState, anchor *Pane, aisOK bool, place
 	if last.Worktree != nil {
 		f.worktree = *last.Worktree
 	}
-	f.from, _ = wtFromIndex(f.hostFrom)
-	if i, ok := wtFromIndex(last.From); ok {
+	f.from = f.defaultFrom()
+	if i, ok := wtFromIndex(last.From); ok && i != wtRef {
 		f.from = i
 	}
 	f.detach = f.hostDetach
@@ -117,6 +137,9 @@ func newCreateForm(snap *Snapshot, st *AisState, anchor *Pane, aisOK bool, place
 	f.about = textinput.New()
 	f.about.Prompt = ""
 	f.about.Placeholder = "what it is for (optional)"
+	f.ref = textinput.New()
+	f.ref.Prompt = ""
+	f.ref.Placeholder = "origin/foo-bar, v1.0, SHA, HEAD~2"
 
 	f.places = places
 	if f.places == nil {
@@ -129,6 +152,52 @@ func newCreateForm(snap *Snapshot, st *AisState, anchor *Pane, aisOK bool, place
 func (f *createForm) refilter() {
 	f.shown = FilterPlaces(f.places, f.where.Value())
 	f.pick = min(f.pick, max(0, len(f.shown)-1))
+	f.syncRef()
+}
+
+func (f *createForm) defaultFrom() int {
+	if i, ok := wtFromIndex(f.hostFrom); ok && i != wtRef {
+		return i
+	}
+	if f.supportsRefs && f.hostFrom != "" {
+		return wtRef
+	}
+	return 0
+}
+
+// syncRef keeps repo-specific text out of other repositories and hosts. The
+// host identity comes from ais state, so it is available for remote forms too.
+func (f *createForm) syncRef() {
+	p, ok := f.dir()
+	scope := ""
+	if ok && p.Repo && f.supportsRefs {
+		scope = f.hostName + "\x00" + p.Dir
+	}
+	if scope == f.refScope {
+		return
+	}
+	f.rememberRef()
+	f.refScope = scope
+	f.ref.SetValue("")
+	f.fetch = f.hostFetch
+	if f.defaultFrom() == wtRef {
+		f.ref.SetValue(f.hostFrom)
+	}
+	if saved, ok := f.refMemory[scope]; ok {
+		f.ref.SetValue(saved.Ref)
+		f.fetch = saved.Fetch
+		if f.preferRef {
+			f.from = wtRef
+		}
+	} else if f.from == wtRef || f.preferRef {
+		f.from = f.defaultFrom()
+	}
+}
+
+func (f *createForm) rememberRef() {
+	if f.refScope != "" && f.from == wtRef {
+		f.refMemory[f.refScope] = lastRef{Ref: f.ref.Value(), Fetch: f.fetch}
+	}
 }
 
 func (f *createForm) profile() string { return f.profiles[f.what] }
@@ -158,6 +227,8 @@ func (f *createForm) applies(field formField) bool {
 		return f.worktreeApplies()
 	case fFrom, fDetach:
 		return f.startApplies()
+	case fRef, fFetch:
+		return f.startApplies() && f.supportsRefs && f.from == wtRef
 	}
 	return true
 }
@@ -179,7 +250,26 @@ func (f *createForm) Spec() (CreateSpec, error) {
 	// Only what differs from the host's own settings goes on the command
 	// line, so the usual case reads as plainly as it did before.
 	if f.startApplies() {
-		if from := wtFroms[f.from].name; from != f.hostFrom {
+		from := wtFroms[f.from].name
+		if f.from == wtRef {
+			from = f.ref.Value()
+			if strings.TrimSpace(from) == "" {
+				return CreateSpec{}, fmt.Errorf("enter a starting Git ref")
+			}
+			if strings.TrimSpace(from) != from || strings.HasPrefix(from, "-") || strings.ContainsAny(from, "\x00\n\r") {
+				return CreateSpec{}, fmt.Errorf("enter a Git ref, not an option or surrounding whitespace")
+			}
+			for i, mode := range wtFroms {
+				if i != wtRef && from == mode.name {
+					return CreateSpec{}, fmt.Errorf("%s is a mode; use refs/heads/%s for that branch", from, from)
+				}
+			}
+			if f.fetch != f.hostFetch {
+				fetch := f.fetch
+				spec.Fetch = &fetch
+			}
+		}
+		if from != f.hostFrom {
 			spec.From = from
 		}
 		if f.detach != f.hostDetach {
@@ -192,7 +282,8 @@ func (f *createForm) Spec() (CreateSpec, error) {
 
 func (f *createForm) remember() {
 	wt := f.worktree
-	last := lastCreate{Profile: f.profile(), Place: placements[f.place]}
+	f.rememberRef()
+	last := lastCreate{Profile: f.profile(), Place: placements[f.place], Refs: f.refMemory}
 	prev := loadLastCreate()
 	if f.worktreeApplies() {
 		last.Worktree = &wt
@@ -217,11 +308,14 @@ func (f *createForm) moveFocus(delta int) {
 	}
 	f.where.Blur()
 	f.about.Blur()
+	f.ref.Blur()
 	switch f.focus {
 	case fWhere:
 		f.where.Focus()
 	case fAbout:
 		f.about.Focus()
+	case fRef:
+		f.ref.Focus()
 	}
 }
 
@@ -232,7 +326,14 @@ func (f *createForm) cycle(delta int) {
 	case fWorktree:
 		f.worktree = !f.worktree
 	case fFrom:
-		f.from = (f.from + delta + len(wtFroms)) % len(wtFroms)
+		n := len(wtFroms)
+		if !f.supportsRefs {
+			n--
+		}
+		f.from = (f.from + delta + n) % n
+		f.preferRef = f.from == wtRef
+	case fFetch:
+		f.fetch = !f.fetch
 	case fDetach:
 		f.detach = !f.detach
 	case fPlace:
@@ -265,9 +366,11 @@ func (f *createForm) update(msg tea.KeyMsg) (cmd tea.Cmd, launch, cancel bool) {
 		switch msg.String() {
 		case "up", "ctrl+p", "ctrl+k":
 			f.pick = max(0, f.pick-1)
+			f.syncRef()
 			return nil, false, false
 		case "down", "ctrl+n", "ctrl+j":
 			f.pick = min(max(0, len(f.shown)-1), f.pick+1)
+			f.syncRef()
 			return nil, false, false
 		}
 		before := f.where.Value()
@@ -277,7 +380,7 @@ func (f *createForm) update(msg tea.KeyMsg) (cmd tea.Cmd, launch, cancel bool) {
 			f.refilter()
 		}
 		return cmd, false, false
-	case fAbout:
+	case fRef, fAbout:
 		switch msg.String() {
 		case "up":
 			f.moveFocus(-1)
@@ -286,7 +389,11 @@ func (f *createForm) update(msg tea.KeyMsg) (cmd tea.Cmd, launch, cancel bool) {
 			f.moveFocus(1)
 			return nil, false, false
 		}
-		f.about, cmd = f.about.Update(msg)
+		if f.focus == fRef {
+			f.ref, cmd = f.ref.Update(msg)
+		} else {
+			f.about, cmd = f.about.Update(msg)
+		}
 		return cmd, false, false
 	}
 	switch msg.String() {
@@ -382,17 +489,27 @@ func (f *createForm) view(w, h int, ais string) []string {
 		tail = append(tail, label(fWorktree, "worktree")+choices(fWorktree, []string{"new", "here"}, wt))
 		if f.startApplies() {
 			var froms []string
-			for _, it := range wtFroms {
-				froms = append(froms, it.name)
+			for i, it := range wtFroms {
+				if i != wtRef || f.supportsRefs {
+					froms = append(froms, it.name)
+				}
 			}
 			detached := 0
 			if f.detach {
 				detached = 1
 			}
-			tail = append(tail,
-				label(fFrom, "from")+choices(fFrom, froms, f.from),
-				label(fDetach, "as")+choices(fDetach, []string{"branch", "detached"}, detached),
-			)
+			tail = append(tail, label(fFrom, "from")+choices(fFrom, froms, f.from))
+			if f.from == wtRef {
+				fetch := 1
+				if f.fetch {
+					fetch = 0
+				}
+				tail = append(tail,
+					label(fRef, "ref")+f.ref.View(),
+					label(fFetch, "fetch")+choices(fFetch, []string{"yes", "no"}, fetch),
+				)
+			}
+			tail = append(tail, label(fDetach, "as")+choices(fDetach, []string{"branch", "detached"}, detached))
 		}
 	}
 	tail = append(tail,
@@ -415,8 +532,12 @@ func (f *createForm) view(w, h int, ais string) []string {
 			if f.detach {
 				what = "detached, named after the session"
 			}
+			base := wtFroms[f.from].what
+			if f.from == wtRef {
+				base = f.ref.Value()
+			}
 			tail = append(tail, fg(cDim).Render(strings.Repeat(" ", 10)+
-				"(ais makes the worktree at "+wtFroms[f.from].what+", "+what+")"))
+				"(ais makes the worktree at "+base+", "+what+")"))
 		case spec.Worktree:
 			tail = append(tail, fg(cDim).Render(strings.Repeat(" ", 10)+"(ais makes the worktree from this repo, named after the session)"))
 		}

@@ -92,7 +92,7 @@ below), so you navigate from where you are rather than from the top.
            ▸ ~/git/widget                    ⎇ repo
              ~/wt/fix-lexer/widget           ⎇ worktree
  worktree   new  here
- from       auto  origin  local  head
+ from       auto  origin  local  head  ref
  as         branch  detached
  place      window in soi  split right  split below  new session
  about     port the parser
@@ -116,11 +116,23 @@ below), so you navigate from where you are rather than from the top.
   whether it gets a branch. They open on that host's own settings, and only a
   choice that differs from them is passed (`--from`, `--[no-]detach`). An ais
   too old to report them gets neither question.
+- Choose **ref** to reveal a text field (`origin/foo-bar`, `v2.4.0`, a SHA,
+  `HEAD~2`, etc.) and a **fetch yes/no** choice. Fetch starts at that host's
+  `worktree.fetch` setting; changing it passes `--fetch` or `--no-fetch`.
+  For example, `ref origin/foo-bar` with fetch enabled creates a session-named
+  branch from the freshly fetched remote branch, without tracking it. Invalid
+  or ambiguous refs and enabled fetch failures stop creation rather than
+  falling back to another base. Use `refs/heads/head` for a branch whose name
+  is also a mode. Git validation/fetching happens in ais on the destination
+  host, not while editing the form. Hosts without explicit-ref support do not
+  offer these controls (update both ais and tsm on remote hosts).
 - **place** puts it after the selection's window, beside the selection, or in
   a session of its own, named like the work (`ais name --of`).
 - `tab` moves between fields, `←→` changes a choice, `↑↓` picks a directory,
   `⏎` starts from any field. What, place, worktree, from and as default to what you
-  chose last (kept in `~/.cache/tsm/`), and the form opens on where — so
+  chose last (kept in `~/.cache/tsm/`). Custom refs and their fetch choice are
+  remembered only for the same host and repository directory, never carried
+  into a different repo. The form opens on where — so
   `n`, a few letters of a repo, `⏎` is the common case.
 
 ## Moving things around
