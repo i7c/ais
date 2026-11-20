@@ -73,14 +73,14 @@ func NewLab(t *testing.T) *Lab {
 		t.Fatal(err)
 	}
 	l := &Lab{
-		t:       t,
-		Dir:     dir,
-		Home:    filepath.Join(dir, "home"),
-		WtBase:  filepath.Join(dir, "wt"),
-		Bin:     filepath.Join(dir, "bin"),
-		Log:     filepath.Join(dir, "log"),
-		Sock:    filepath.Join(sockDir, "s"),
-		ais:     aisUnderTest(t),
+		t:      t,
+		Dir:    dir,
+		Home:   filepath.Join(dir, "home"),
+		WtBase: filepath.Join(dir, "wt"),
+		Bin:    filepath.Join(dir, "bin"),
+		Log:    filepath.Join(dir, "log"),
+		Sock:   filepath.Join(sockDir, "s"),
+		ais:    aisUnderTest(t),
 	}
 	l.AisHome = filepath.Join(l.Home, ".ais")
 	for _, d := range []string{l.Home, l.AisHome, l.Bin, l.Log} {
@@ -239,8 +239,14 @@ func (l *Lab) Attach() {
 	}
 	cmd := exec.Command("script", "-qfec", "tmux -S "+l.Sock+" attach -t lab", "/dev/null")
 	cmd.Env = append(l.env, "COLUMNS=200", "LINES=50")
+	// script passes its stdin to the client, so an empty one would arrive as
+	// ^D in the shown pane: its shell would exit, and with it, possibly, the
+	// whole server. A pipe nobody writes to stays open instead.
+	stdin, hold, err := os.Pipe()
+	must(l.t, err)
+	cmd.Stdin = stdin
 	must(l.t, cmd.Start())
-	l.t.Cleanup(func() { cmd.Process.Kill(); cmd.Wait() })
+	l.t.Cleanup(func() { cmd.Process.Kill(); cmd.Wait(); hold.Close(); stdin.Close() })
 	l.Eventually("a client attaches", func() bool {
 		out, _ := l.tmux("list-clients", "-F", "#{client_name}")
 		return strings.TrimSpace(out) != ""

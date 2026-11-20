@@ -187,14 +187,14 @@ func TestRunRefusals(t *testing.T) {
 		env  []string
 		args []string
 	}{
-		"outside tmux":           {nil, []string{"run", "fake"}},
-		"harness not on PATH":    {here, []string{"run", "no-such-harness"}},
-		"no profile named":       {here, []string{"run"}},
-		"nothing after --":       {here, []string{"--"}},
-		"unknown run option":     {here, []string{"run", "fake", "--bogus"}},
-		"fork with -w":           {here, []string{"run", "--fork", "abc", "-w"}},
-		"no-worktree with from":  {here, []string{"run", "fake", "--no-worktree", "--from", "origin"}},
-		"unknown command":        {nil, []string{"frobnicate"}},
+		"outside tmux":          {nil, []string{"run", "fake"}},
+		"harness not on PATH":   {here, []string{"run", "no-such-harness"}},
+		"no profile named":      {here, []string{"run"}},
+		"nothing after --":      {here, []string{"--"}},
+		"unknown run option":    {here, []string{"run", "fake", "--bogus"}},
+		"fork with -w":          {here, []string{"run", "--fork", "abc", "-w"}},
+		"no-worktree with from": {here, []string{"run", "fake", "--no-worktree", "--from", "origin"}},
+		"unknown command":       {nil, []string{"frobnicate"}},
 	}
 	for name, c := range cases {
 		r := l.Ais(c.env, c.args...)
@@ -233,4 +233,3 @@ func TestReapAfterHardKill(t *testing.T) {
 		t.Errorf("sessions.json version = %v, want 1", raw["version"])
 	}
 }
-
