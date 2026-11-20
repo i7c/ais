@@ -1,6 +1,6 @@
 # Proposal: `ais flow` — planned, dispatched agent sessions
 
-Status: **draft for review** (2026-11-20)
+Status: **reviewed, two questions open** (2026-11-20)
 
 ## 1. What this is for
 
@@ -32,14 +32,15 @@ From the requirements round and the survey (sources archived under
 | Decision | Choice |
 |---|---|
 | Build or adopt | Build on ais. kandev was the only close fit, but it means a web UI instead of tmux and its Claude mode sits on the Agent SDK. |
-| Runtime | No daemon. **systemd user timers** run one-shot `ais flow` commands; state lives in **SQLite** (Python stdlib). |
+| Runtime | No daemon. **systemd user timers** run one-shot `ais flow` commands; state lives in **SQLite** (`modernc.org/sqlite`, pure Go). |
 | Where | agalloch only, local tmux. Remote dispatch later. |
 | Harnesses | Claude Code required, signed-in binary (subscription). pi and others via ais profiles. |
 | Task source | GitHub Projects v2 **Status** field: `ready` → `scheduled` → `In Progress`. Issue search with labels as a fallback source. |
-| Planner | One per workspace, singleton, closed explicitly or after 48 h without my input. |
+| Planner | One per workspace, singleton, closed explicitly or after 48 h without my input. It always sees **every** `ready` ticket; whatever I don't accept stays `ready` for the next planner. |
 | WIP | Live *dispatched* sessions count; hand-started ones don't. Global and per-workspace caps. A slot is freed **only** by an explicit `done`. |
-| Rate | While under WIP: ≤ 4 starts/hour and ≤ 16/day, rolling windows. Manual start command exists. Usage-limit awareness later. |
+| Rate | Global: while under WIP, ≤ 4 starts/hour and ≤ 16/day, rolling windows. Overridable from the command line for a while (`ais flow limit per_day 32 --until eod`). Manual start command exists. Usage-limit awareness later. |
 | Queue | Local SQLite is the source of truth, plus a short comment on each ticket. Editable via CLI (and later tsm). |
+| Language | **Go.** ais is ported to Go first, then flow is built in it (§13). |
 
 Why not a workflow engine (DBOS, Temporal, pueue…): a handful of events per day
 for one user. Everything they offer that we need — scheduling, mutual
@@ -79,7 +80,7 @@ Workspaces go into `~/.ais/config.toml`, next to the profiles they use:
 wip = 4                   # live dispatched sessions, all workspaces together
 per_hour = 4              # starts in any rolling 60 min (dispatcher only)
 per_day = 16              # starts in any rolling 24 h
-# quiet = "22:00-08:00"   # optional: no automatic starts in this window
+                          # all three apply across workspaces: one subscription
 
 [workspace.soi]
 tmux_session = "soi"
@@ -105,7 +106,9 @@ frontend = "~/git/soi-frontend"
 profile = "claude"
 prompt = "/plan-sessions soi"      # a skill, see §8
 cwd = "~/git/soi-backend"          # where the planner runs; no worktree
-schedule = "Mon..Fri *-*-* 08..19:00:00"   # systemd OnCalendar
+schedule = "Mon..Fri *-*-* 09,14:00:00"    # systemd OnCalendar; every firing
+                                           # with ready tickets and no open
+                                           # planner starts one
 idle_timeout = "48h"
 
 [workspace.soi.session]            # defaults for dispatched sessions
@@ -131,7 +134,8 @@ refers to sessions by ais id and never writes that file.
 
 ```
 planners   (id, workspace, ais_session, state, started_at, last_input_at,
-            closed_at, reason, items_seen JSON)
+            closed_at, reason)
+overrides  (key, value, until, set_at)                -- temporary limits
 proposals  (id, workspace, title, tickets JSON, repos JSON, profile, prompt,
             priority, after JSON, state, planner_id, created_at,
             ais_session, started_at, done_at, manual BOOL)
@@ -151,8 +155,8 @@ All under `ais flow`, all one-shot. `--json` on every read.
 
 | Command | Who runs it | What it does |
 |---|---|---|
-| `ais flow plan <ws>` | planner timer, or me | Expire an idle planner; if none is open and the source has new `ready` items, start one. `--force` starts one regardless. |
-| `ais flow ready <ws>` | planner agent | List `ready` items not already queued. |
+| `ais flow plan <ws>` | planner timer, or me | Expire an idle planner; if none is open and the source has any `ready` item, start one. Run by hand, it is "plan now". |
+| `ais flow ready <ws>` | planner agent | List all `ready` items. |
 | `ais flow queue add …` | planner agent | Store a proposal, set its tickets to `scheduled`, comment on them. |
 | `ais flow queue [ls\|edit\|mv\|cancel] …` | me | Inspect, change priority, edit prompt, cancel (tickets go back to `ready`). |
 | `ais flow plan done` | planner agent | Mark the current planner `decided`; its window closes on the next tick. |
@@ -160,6 +164,7 @@ All under `ais flow`, all one-shot. `--json` on every read.
 | `ais flow dispatch --now <id>` | me | Start one proposal now, past WIP and rate limits (still logged and counted). |
 | `ais flow start <id>` | the new tmux pane | Make worktrees, set `In Progress`, exec the harness through ais. Internal. |
 | `ais flow done [<ais id>]` | me, or the agent when I say so | Mark the run done; frees the slot. Defaults to the current session. |
+| `ais flow limit <key> <value> [--until eod\|HH:MM\|<date> \| --for 3h]` | me | Override `wip`, `per_hour` or `per_day` until the given time; the default is the end of the day. `ais flow limit` alone shows the effective limits and where each comes from; `--clear` drops overrides. |
 | `ais flow ls` | me | Planners, queue, running, done-today, limits used. |
 | `ais flow log` | me | The events table, newest first. |
 | `ais flow install` | me, once | Write and enable the systemd units (§7). Like `ais install`, idempotent, `-n` previews. |
@@ -177,7 +182,7 @@ ExecStart=%h/.local/bin/ais flow plan %i
 
 # ais-flow-plan@.timer — OnCalendar from workspace.<ws>.planner.schedule
 [Timer]
-OnCalendar=Mon..Fri *-*-* 08..19:00:00
+OnCalendar=Mon..Fri *-*-* 09,14:00:00
 Persistent=false
 
 # ais-flow-dispatch.service
@@ -222,16 +227,19 @@ with `tmux new-session -d -s <ws>`.
    - no input from me for `idle_timeout` → close its window, mark `expired`,
      continue;
    - otherwise → stop; there is already one waiting for me.
-2. Fetch items with Status = `ready`. Drop those already in the queue.
-3. Start a planner only if some item was **not presented to the last planner**
-   (`items_seen`), or `--force`. Without this rule, tickets I deliberately left
-   `ready` would summon a fresh planner every hour.
-4. Open a window named `plan` in the workspace's tmux session and type into it
+2. Fetch items with Status = `ready`. If there are none, stop.
+3. Open a window named `plan` in the workspace's tmux session and type into it
    `ais flow start planner:<id>`, which runs the profile with the planner prompt
    in `planner.cwd` (no worktree).
 
 The planner raises its own `ais notify` when its proposals are ready, as every
 session already does when it stops for me.
+
+Every planner sees all `ready` tickets, including the ones the last planner
+proposed and I didn't take. Ready tickets are simply the pile of work. How
+often a planner appears is set by `planner.schedule`. With leftover tickets
+that pile never empties, so the schedule should be what I'd tolerate: twice a
+weekday by default.
 
 ### Idle time
 
@@ -260,7 +268,15 @@ It does not do the work.
    --repos backend,iac --priority N [--after P] [--profile pi] --notes -`.
    flow sets the Status and comments on the tickets; the agent doesn't touch
    Status itself.
-5. `ais flow plan done`, then say what was queued.
+5. Leave everything else alone. I only ever say "yes, now" to sessions. There
+   is no "not now" and no defer: an unaccepted ticket stays `ready` and goes
+   to the next planner.
+6. `ais flow plan done`, then say what was queued.
+
+**Abandoning tickets** is separate from scheduling. When I say "abandon
+those" during a planner session, the agent closes them as *not planned* with a
+one-line reason (`gh issue close --reason "not planned" --comment …`). The
+project's own workflow then moves them out of `ready`. flow has no part in it.
 
 ### Closing
 
@@ -281,11 +297,12 @@ the last 5 minutes.
      `done` frees a slot. `ais flow ls` shows them as *dead, not done* so I
      notice.
    - Closed planners' windows → closed (§8).
-2. **Capacity.**
+2. **Capacity.** Uses the effective limits: config, overridden by any
+   unexpired `ais flow limit`.
    - Global: `wip − running > 0`.
    - Workspace: `ws.wip − running(ws) > 0`.
-   - `starts(last 60 min) < per_hour` and `starts(last 24 h) < per_day`.
-   - Not in `quiet`, when it is set.
+   - `starts(last 60 min) < per_hour` and `starts(last 24 h) < per_day`,
+     counted across all workspaces.
    - *Later:* a usage gate (§12).
 3. **Pick.** Among `queued` proposals whose `after` is satisfied (the earlier
    proposal is `done`, or the ticket is closed), take the highest priority,
@@ -373,56 +390,131 @@ whether the move was a mistake.
   into a follow-up, e.g. "review session after this one is done". The `after`
   field is where that starts.
 
-## 13. Build plan
+## 13. Implementation language and layout
+
+**Decision: Go, one module, two binaries.** ais is ported from Python before
+flow is written.
+
+Why Go:
+
+- **One language for the whole system.** tsm is already Go (Bubble Tea,
+  BurntSushi/toml). Today it decodes ais's JSON API with its own types. A
+  shared `internal/` package makes the types and the contract one piece of
+  code instead of two that must agree.
+- **Deployment.** Static binaries, cross-compiled. tsm already ships to
+  agalloch, karif and the Mac that way. ais currently needs a Python ≥ 3.11 on
+  every host and a symlink into a checkout.
+- **What flow adds favours static types.** SQLite state with transitions, time
+  windows, GitHub GraphQL ids, a config that grows workspaces. These are the
+  parts where a typo in a dict key is a 3 a.m. bug in Python and a compile
+  error in Go.
+- **Hooks are latency-sensitive.** `ais _session-seen`, `ais _activity` and
+  `ais notify` run inside every harness event. A Go binary starts in a few ms.
+- **SQLite without cgo.** `modernc.org/sqlite` is pure Go, so
+  cross-compilation keeps working.
+
+Why port first rather than writing flow in Go beside Python ais: flow reaches
+deep into ais — `run`, worktree creation, the session record, the harness
+hooks. Writing flow against Python ais would mean either duplicating the
+worktree and launch logic in two languages or building flow in Python and
+porting it later. Porting first means each piece is written once.
+
+Why not TypeScript: no gain over Go for a CLI that shells out to tmux, git and
+gh. It would add a runtime (Node or Bun) on every host and a third language
+next to Go and the remaining shell glue.
+
+Cost, said plainly: the port is the largest single step, about 3.5k lines of
+Python. Its 154 unit tests exercise Python internals, so they can't verify the
+port. That makes step 1 below — a black-box suite written against today's
+Python ais — what makes the port safe.
+
+Layout after the port:
+
+```
+go.mod                      module github.com/i7c/ais
+cmd/ais/                    the ais binary (sessions, notify, wt, flow …)
+cmd/tsm/                    the tsm binary (moved from tsm/)
+internal/api/               the versioned JSON contract (state, env)
+internal/session/           sessions.json, locking, reaping
+internal/profile/           config.toml, profiles, harness install
+internal/worktree/
+internal/tmux/              shared by ais and tsm
+internal/flow/              workspaces, db, source, planner, dispatcher
+internal/flow/github/       Projects v2 via gh, behind a Source interface
+acceptance/                 black-box CLI tests on a `tmux -L` lab server
+```
+
+`sessions.json` (version 1), `config.toml`, the `ais state --json` API and the
+pane marks stay exactly as they are. Running sessions survive the switch, and
+the Python and Go binaries can be swapped back and forth until the port has
+proven itself.
+
+## 14. Build plan
 
 Each step is one or two commits and usable on its own.
 
-0. **Spike (½ day).** Settle the two open facts before writing flow code:
+0. **Spike (½ day).** Settle the two open facts before writing code:
    - Does `claude "/work-tickets <url>"` invoke the skill?
    - Does a `UserPromptSubmit` hook fire for typed prompts but not for the
      positional initial prompt?
-1. **ais groundwork.**
-   - The `prompt` key on profiles; `ais run … --prompt-file`.
+1. **Acceptance suite.**
+   - Go tests that drive the `ais` CLI as a black box: run, ls/state/env,
+     notify and its sink, wt add/ls/path/prune, restart, fork, name, install
+     (dry run), and the hook entry points.
+   - Each test gets its own `AIS_HOME`, worktree base and `tmux -L` server
+     (never `TMUX_TMPDIR`), with a fake harness script standing in for claude
+     and pi.
+   - Green against today's Python ais.
+2. **Module restructure.** Move tsm to `cmd/tsm` and extract `internal/api`
+   and `internal/tmux`. No behaviour change, and tsm's tests stay green.
+3. **Port ais to Go.**
+   - Command by command, until the acceptance suite is green against the Go
+     binary.
+   - Install it beside the Python one, as `ais-go`, for a few days of real
+     use.
+   - Then switch `~/.local/bin/ais` on agalloch and karif, and delete the
+     Python.
+4. **ais groundwork for flow.**
+   - The `prompt` key on profiles and `ais run --prompt-file`.
    - `ais _activity` with its claude and pi hooks; `last_input_at` in
      `ais state`.
-   - A multi-repo `ais run --repos a,b,c` that creates all the worktrees up
-     front.
-2. **flow core.**
-   - `flow.db`, the `[workspace]` config, the GitHub project source (read,
-     write, id cache).
-   - `ais flow ready`, `queue add/ls/cancel`, `ls`, `log`.
-3. **Dispatcher.**
-   - `dispatch`, `start`, `done`, `dispatch --now`, the limits, reconcile.
+   - `ais run --repos a,b,c` to make all the worktrees up front.
+5. **flow core.**
+   - `flow.db` and the `[workspace]` config.
+   - The GitHub project source: read, write, id cache.
+   - `ais flow ready`, `queue add/ls/cancel`, `limit`, `ls`, `log`.
+6. **Dispatcher.**
+   - `dispatch`, `start`, `done`, `dispatch --now`, the limits and
+     overrides, reconcile.
    - `ais flow install` for the dispatch timer.
-   - Tested on an isolated `tmux -L` server (never `TMUX_TMPDIR`) against a
-     scratch project.
-4. **Planner.**
-   - `ais flow plan` with singleton, idle expiry and the new-items rule.
+   - Acceptance tests against a scratch GitHub project.
+7. **Planner.**
+   - `ais flow plan` with the singleton and idle expiry.
    - The plan timer.
    - The `plan-sessions` skill.
-5. **Live on soi.**
+8. **Live on soi.**
    - Mark two or three real tickets `ready` and run a week with `wip = 2`.
    - Then raise the limits.
-6. **Later items** (§12) as they become worth it.
+9. **Later items** (§12) as they become worth it.
 
-## 14. Open questions (with the default I'd take)
+## 15. Settled in review
 
-1. **Rate limits: global or per workspace?** Default: global, because the
-   Claude subscription is shared. A workspace can set a lower cap of its own.
-2. **Quiet hours.** You didn't pick a window. Default: off. The planner
-   schedule (weekdays 08–19) already keeps planners out of the night, and a
-   dispatched session waiting overnight costs nothing.
-3. **Leftover `ready` tickets.** Should a ticket I skipped in one planner
-   trigger the next? Default: no, only *new* ready items start a planner
-   (§8.3). Skipped tickets still show up when something new arrives.
-   `ais flow plan --force` covers the rest.
-4. **"Not now" for a ticket.** Default: the planner can move it back to Todo
-   when I say so. A `defer --until` is not needed yet.
-5. **Who may call `ais flow done`?** Default: me, or the agent when I tell it
-   to. The agent never calls it on its own judgment.
-6. **Dead but not done.** Should a dispatched session that exited still hold
-   its slot? Default: yes, as you said: the slot frees on explicit done only.
-   `ls` flags it, and after 24 h a quiet notification reminds me.
-7. **Code layout.** ais is one 3.5k-line file. Default: put flow in a sibling
-   module, `ais_flow.py`, imported by `ais` (resolving through its symlink),
-   so the main file stops growing.
+- Rate limits are global. `ais flow limit` overrides them from the command
+  line until a given time, by default the end of the day.
+- No quiet hours.
+- Every planner considers all `ready` tickets. Unaccepted ones stay `ready` for
+  the next planner. There is no "not now" or defer.
+- "Abandon these tickets" is separate from scheduling. The planner closes them
+  as not planned when asked.
+- `ais flow done` is run by me, or by the agent when I tell it to. It frees the
+  slot, and nothing else does.
+- Language: Go, porting ais first (§13).
+
+## 16. Still open
+
+1. **What abandoning means on GitHub.** Default: close the issue as *not
+   planned* with a one-line reason. An alternative is a separate project
+   Status such as `abandoned` that keeps the issue open.
+2. **The planner schedule.** Default: weekdays at 09:00 and 14:00. Since the
+   pile of ready tickets rarely empties, this is effectively how often a
+   planner asks for me.
