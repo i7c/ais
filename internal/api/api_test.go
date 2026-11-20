@@ -1,6 +1,8 @@
 package api
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -62,5 +64,32 @@ func TestParseEnv(t *testing.T) {
 	e, err := ParseEnv([]byte(`{"api": 1, "id": "x", "cwd": "/w", "env": {"AIS_SESSION": "x"}}`))
 	if err != nil || e.Cwd != "/w" || e.Env["AIS_SESSION"] != "x" {
 		t.Errorf("ParseEnv = %+v, %v", e, err)
+	}
+}
+
+// What ais writes: nulls for what is not known, [] for empty lists, and only
+// the worktree keys it has.
+func TestSessionEncodesLikeAis(t *testing.T) {
+	b, err := json.Marshal(Session{ID: "x", Status: "active", Worktree: Worktree{Base: "/w"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"pid", "ended_at", "exit_code", "conversation", "restart_of", "fork_of"} {
+		if v, ok := m[k]; !ok || v != nil {
+			t.Errorf("%s = %v (present %v), want null", k, v, ok)
+		}
+	}
+	if a, ok := m["args"].([]any); !ok || len(a) != 0 {
+		t.Errorf("args = %v, want []", m["args"])
+	}
+	if wt := m["worktree"].(map[string]any); len(wt) != 1 || wt["base"] != "/w" {
+		t.Errorf("worktree = %v", wt)
+	}
+	if strings.Count(string(b), `"pid"`) != 1 {
+		t.Errorf("pid encoded twice: %s", b)
 	}
 }

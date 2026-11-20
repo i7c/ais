@@ -7,8 +7,8 @@
 // types, so a rename here cannot pass unnoticed.
 //
 // Nullable fields (ended_at, exit_code, conversation, restart_of, fork_of,
-// pid) decode to their zero values, which is all a reader needs. ais itself
-// must still encode them as null.
+// pid) decode to their zero values, which is all a reader needs, and encode
+// back to null (Session.MarshalJSON), which is what ais promises.
 package api
 
 import (
@@ -81,10 +81,10 @@ type Session struct {
 
 // Worktree is where a session's worktrees live; empty for one without.
 type Worktree struct {
-	Base    string `json:"base"`
-	Initial string `json:"initial"`
-	Branch  string `json:"branch"`
-	Root    string `json:"root"`
+	Base    string `json:"base,omitempty"`
+	Initial string `json:"initial,omitempty"`
+	Branch  string `json:"branch,omitempty"`
+	Root    string `json:"root,omitempty"`
 }
 
 // Location is where a session's pane is, as of the read.
@@ -99,13 +99,13 @@ type Location struct {
 
 // Notification is one "ais notify".
 type Notification struct {
-	ID         string `json:"id"`
+	ID         string `json:"id,omitempty"`
 	At         string `json:"at"`
 	Message    string `json:"message"`
 	Delivered  bool   `json:"delivered"`
 	Suppressed bool   `json:"suppressed"`
 	Seen       bool   `json:"seen"` // its pane has been on screen since
-	SeenAt     string `json:"seen_at"`
+	SeenAt     string `json:"seen_at,omitempty"`
 }
 
 // Env is "ais env <id> --json".
@@ -114,6 +114,43 @@ type Env struct {
 	ID  string            `json:"id"`
 	Cwd string            `json:"cwd"`
 	Env map[string]string `json:"env"`
+}
+
+// MarshalJSON writes a session as ais does: unknown values as null, lists
+// as lists even when empty.
+func (s Session) MarshalJSON() ([]byte, error) {
+	type plain Session
+	out := struct {
+		plain
+		PID          *int    `json:"pid"`
+		StartedAt    *string `json:"started_at"`
+		EndedAt      *string `json:"ended_at"`
+		Conversation *string `json:"conversation"`
+		RestartOf    *string `json:"restart_of"`
+		ForkOf       *string `json:"fork_of"`
+	}{plain: plain(s)}
+	if s.PID != 0 {
+		out.PID = &s.PID
+	}
+	out.StartedAt = nullable(s.StartedAt)
+	out.EndedAt = nullable(s.EndedAt)
+	out.Conversation = nullable(s.Conversation)
+	out.RestartOf = nullable(s.RestartOf)
+	out.ForkOf = nullable(s.ForkOf)
+	if out.Args == nil {
+		out.Args = []string{}
+	}
+	if out.Notifications == nil {
+		out.Notifications = []Notification{}
+	}
+	return json.Marshal(out)
+}
+
+func nullable(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
 }
 
 // ParseState decodes "ais state --json", refusing another api version.
