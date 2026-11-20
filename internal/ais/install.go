@@ -236,10 +236,13 @@ func installInstructions(harness, path string, dry bool) {
 	var updated, action string
 	if strings.Contains(text, sectionBegin) && strings.Contains(text, sectionEnd) {
 		head, rest, _ := strings.Cut(text, sectionBegin)
-		_, tail, _ := strings.Cut(rest, sectionEnd)
+		current, tail, _ := strings.Cut(rest, sectionEnd)
 		updated = head + block + strings.TrimLeft(tail, "\n")
 		action = "replaced"
-		if updated == text {
+		// Only the section is ais's: when it already says the right thing,
+		// the file is left alone, blank lines around it included (a setup
+		// that generates the file may well put them there).
+		if sectionBegin+current+sectionEnd+"\n" == block {
 			action = "unchanged"
 		}
 	} else {

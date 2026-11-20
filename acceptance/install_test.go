@@ -62,6 +62,8 @@ func TestInstallClaude(t *testing.T) {
 		t.Errorf("CLAUDE.md section differs from ais instructions --markers")
 	}
 
+	// Blank lines a generator put after the section are not ais's business.
+	l.WriteFile(claudeMD, l.ReadFile(claudeMD)+"\n\n")
 	once := snapshot(t, settings, claudeMD, config)
 	l.MustAis(nil, "install", "--harness", "claude")
 	if twice := snapshot(t, settings, claudeMD, config); twice != once {
