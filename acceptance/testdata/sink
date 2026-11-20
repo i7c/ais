@@ -1,0 +1,12 @@
+#!/bin/bash
+# A stand-in notification sink ([notify] sink). Records the payload it is
+# offered and answers with whatever $FAKE_LOG/sink.result says: "shown"
+# (default), "suppressed", or "decline" to exit non-zero.
+set -u
+n=$(ls "$FAKE_LOG"/sink-*.json 2>/dev/null | wc -l)
+cat > "$FAKE_LOG/sink-$((n + 1)).json"
+result=$(cat "$FAKE_LOG/sink.result" 2>/dev/null || echo shown)
+if [ "$result" = decline ]; then
+  exit 1
+fi
+printf '{"result": "%s"}\n' "$result"

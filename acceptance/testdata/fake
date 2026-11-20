@@ -1,0 +1,45 @@
+#!/bin/bash
+# A stand-in agent harness for the acceptance suite.
+#
+# It records how it was started — argv, cwd and the AIS_/FAKE_ environment —
+# under $FAKE_LOG/<AIS_SESSION>/, then waits until the test writes an exit
+# code into that directory's "exit" file. Two of its own arguments act like a
+# harness's hooks, so the tests can drive ais the way claude and pi do:
+#
+#   --report ID        report conversation ID through "ais _session-seen", as
+#                      claude's SessionStart hook does
+#   --nested-report ID report it from a child process that is itself a "fake",
+#                      as a harness nested inside the session would
+#
+# Everything else is ignored, and recorded.
+set -u
+sid="${AIS_SESSION:-none}"
+dir="$FAKE_LOG/$sid"
+mkdir -p "$dir"
+printf '%s\n' "$@" > "$dir/argv"
+pwd > "$dir/cwd"
+env | grep -E '^(AIS_|FAKE_)' | sort > "$dir/env"
+echo $$ > "$dir/pid"
+
+if [ "${FAKE_CHILD:-}" = 1 ]; then
+  # The nested run: report and leave.
+  printf '{"session_id":"%s"}' "$2" | ais _session-seen
+  exit 0
+fi
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --report)
+      printf '{"session_id":"%s"}' "$2" | ais _session-seen
+      shift ;;
+    --nested-report)
+      FAKE_CHILD=1 "$0" --child "$2" || true
+      shift ;;
+  esac
+  shift
+done
+
+touch "$dir/ready"
+while [ ! -e "$dir/exit" ]; do sleep 0.05; done
+code=$(cat "$dir/exit")
+exit "${code:-0}"

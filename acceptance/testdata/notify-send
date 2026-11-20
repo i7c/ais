@@ -1,0 +1,4 @@
+#!/bin/bash
+# Stands in for the desktop: records every banner it is asked to raise.
+printf '%s\n' "$@" >> "$FAKE_LOG/notify-send"
+printf -- '--\n' >> "$FAKE_LOG/notify-send"
