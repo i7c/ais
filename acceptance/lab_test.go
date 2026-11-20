@@ -21,6 +21,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -149,6 +150,10 @@ func NewLab(t *testing.T) *Lab {
 	l.pid = strings.TrimSpace(l.tmuxMust("display-message", "-p", "#{pid}"))
 	t.Cleanup(func() {
 		exec.Command("tmux", "-S", l.Sock, "kill-server").Run()
+		// The sessions' ais processes outlive the server by a moment while
+		// they record how their session ended; let them, before the lab's
+		// directories go.
+		l.waitForLabProcesses(5 * time.Second)
 		os.RemoveAll(sockDir)
 	})
 	return l
@@ -632,6 +637,30 @@ func deref[T any](p *T) T {
 func (l *Lab) HerePane() string {
 	l.t.Helper()
 	return l.Format("lab:0", "#{pane_id}")
+}
+
+// waitForLabProcesses waits until no process carries this lab's
+// environment (FAKE_LOG is unique to it).
+func (l *Lab) waitForLabProcesses(limit time.Duration) {
+	marker := []byte("FAKE_LOG=" + l.Log + "\x00")
+	deadline := time.Now().Add(limit)
+	for time.Now().Before(deadline) {
+		entries, _ := os.ReadDir("/proc")
+		alive := false
+		for _, e := range entries {
+			if e.Name()[0] < '0' || e.Name()[0] > '9' || e.Name() == strconv.Itoa(os.Getpid()) {
+				continue
+			}
+			if env, err := os.ReadFile("/proc/" + e.Name() + "/environ"); err == nil && bytes.Contains(env, marker) {
+				alive = true
+				break
+			}
+		}
+		if !alive {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 func parentOf(t *testing.T, pid string) string {

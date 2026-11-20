@@ -179,6 +179,17 @@ func cmdQueueAdd(args []string) error {
 	if err != nil {
 		return err
 	}
+	// An epic stays ready while it has open sub-issues: sessions take those,
+	// and the epic is only queued once they are closed, to finish it.
+	for _, t := range tickets {
+		open, err := openSubIssues(t)
+		if err != nil {
+			return err
+		}
+		if open > 0 {
+			return fmt.Errorf("%s has %d open sub-issue(s): queue those (ais flow ready --json lists them); the epic stays ready until they are closed", shortTickets([]string{t}), open)
+		}
+	}
 
 	p := &Proposal{ID: newID("p"), Workspace: w.Name, Title: title, Tickets: tickets, Repos: repos,
 		Profile: profile, Prompt: prompt, CustomPrompt: custom, Notes: notes, Priority: priority,
@@ -559,25 +570,60 @@ func cmdReady(args []string) error {
 		return err
 	}
 	defer db.Close()
-	items, err := sourceFor(w, db).Ready()
+	tickets, err := readyWork(w, db)
 	if err != nil {
 		return err
 	}
 	if o.flags["--json"] {
-		if items == nil {
-			items = []Item{}
+		if tickets == nil {
+			tickets = []Ticket{}
 		}
-		return writeJSON(items)
+		return writeJSON(tickets)
 	}
-	if len(items) == 0 {
+	if len(tickets) == 0 {
 		note("no tickets marked %s on %s/%d", w.Source.Ready, w.Source.Owner, w.Source.Project)
 		return nil
 	}
 	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
-	for _, it := range items {
-		fmt.Fprintf(tw, "%s#%d\t%s\t%s\n", it.Repo, it.Number, elide(it.Title, 60), it.URL)
+	for _, t := range tickets {
+		what := ""
+		switch {
+		case t.OpenSubs > 0:
+			what = fmt.Sprintf("epic: %d sub-issue(s) open, %d plannable", t.OpenSubs, len(t.Work))
+		case t.HeldBy != "":
+			what = "held by " + t.HeldBy
+		case !t.Plannable:
+			what = orDefault(t.Status, t.State)
+		case len(t.SubIssues) > 0:
+			what = "epic: every sub-issue closed, ready to finish"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\n", shortTickets(([]string{t.URL})), elide(t.Title, 60), what)
+		if t.OpenSubs > 0 {
+			for _, sub := range t.SubIssues {
+				printSub(tw, sub, "  ")
+			}
+		}
 	}
 	return tw.Flush()
+}
+
+func printSub(tw *tabwriter.Writer, t Ticket, indent string) {
+	if t.State != "OPEN" {
+		return
+	}
+	what := "plannable"
+	switch {
+	case t.OpenSubs > 0:
+		what = fmt.Sprintf("%d sub-issue(s) open", t.OpenSubs)
+	case t.HeldBy != "":
+		what = "held by " + t.HeldBy
+	case !t.Plannable:
+		what = t.Status
+	}
+	fmt.Fprintf(tw, "%s%s\t%s\t%s\n", indent, shortTickets([]string{t.URL}), elide(t.Title, 58), what)
+	for _, sub := range t.SubIssues {
+		printSub(tw, sub, indent+"  ")
+	}
 }
 
 func writeJSON(v any) error {

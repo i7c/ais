@@ -175,6 +175,15 @@ func cmdDone(args []string) error {
 		return err
 	}
 	note("%s done (%s); its slot is free", p.ID, p.Title)
+	// A free slot is a reason to plan: if there is work and room, the
+	// planner opens now rather than at the next scheduled check.
+	if cfg, err := loadConfig(); err == nil {
+		if w, err := cfg.workspace(p.Workspace); err == nil {
+			if err := planWorkspace(db, cfg, w, planAfterDone, false); err != nil {
+				note("could not start a planner: %v", err)
+			}
+		}
+	}
 	return nil
 }
 

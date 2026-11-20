@@ -60,7 +60,7 @@ Description=ais flow: start a planner for workspace %i when tickets are ready
 
 [Service]
 Type=oneshot
-` + env + `ExecStart=` + bin + ` flow plan %i
+` + env + `ExecStart=` + bin + ` flow plan %i --auto
 `}}
 	var names []string
 	for n := range cfg.Workspaces {

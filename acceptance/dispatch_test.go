@@ -174,7 +174,7 @@ func TestFlowInstall(t *testing.T) {
 	if tm := l.ReadFile(filepath.Join(dir, "ais-flow-dispatch.timer")); !strings.Contains(tm, "OnCalendar=*:0/5") {
 		t.Errorf("timer:\n%s", tm)
 	}
-	if pl := l.ReadFile(filepath.Join(dir, "ais-flow-plan-soi.timer")); !strings.Contains(pl, "Unit=ais-flow-plan@soi.service") || !strings.Contains(pl, "OnCalendar=Mon..Fri *-*-* 09,14:00:00") {
+	if pl := l.ReadFile(filepath.Join(dir, "ais-flow-plan-soi.timer")); !strings.Contains(pl, "Unit=ais-flow-plan@soi.service") || !strings.Contains(pl, "OnCalendar=Mon..Fri *-*-* 08..20:00:00") {
 		t.Errorf("planner timer:\n%s", pl)
 	}
 	if out := l.MustFlow("install", "--no-enable").Stdout; strings.Count(out, "unchanged") != 4 {

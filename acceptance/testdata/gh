@@ -3,7 +3,8 @@
 
 State lives in $FAKE_LOG/gh/: project.json ({"items": [...]} as gh prints it),
 comments.json (what "gh issue comment" was asked to post), closed (issue
-URLs "gh issue view" reports as closed), calls.log (every
+URLs "gh issue view" reports as closed), subissues.json ({issue URL: [its
+sub-issue URLs]}), calls.log (every
 call), and an optional "fail" file naming a subcommand ("item-edit",
 "item-list", "comment") that should fail.
 """
@@ -54,7 +55,11 @@ elif args[:2] == ["project", "item-edit"]:
 elif args[:2] == ["issue", "view"]:
     path = os.path.join(root, "closed")
     closed = open(path).read().split() if os.path.exists(path) else []
-    print(json.dumps({"state": "CLOSED" if args[2] in closed else "OPEN"}))
+    subs_path = os.path.join(root, "subissues.json")
+    subs = json.load(open(subs_path)) if os.path.exists(subs_path) else {}
+    state = lambda u: "CLOSED" if u in closed else "OPEN"
+    nodes = [{"url": u, "title": "sub " + u.rsplit("/", 1)[-1], "state": state(u)} for u in subs.get(args[2], [])]
+    print(json.dumps({"state": state(args[2]), "subIssues": {"nodes": nodes, "totalCount": len(nodes)}}))
 elif args[:2] == ["issue", "comment"]:
     if fail == "comment":
         sys.exit("HTTP 502: fake failure")

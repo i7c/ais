@@ -12,15 +12,21 @@ const usageText = `usage: ais flow <command> [options]
 
 Planned and dispatched sessions: see docs/flow-proposal.md.
 
-  plan [WS] [--dry-run]        start a planner session if there are ready
-                               tickets and none is open; close one that has
-                               waited idle_timeout for you, or whose session
-                               ended (what the planner timer runs)
+  plan [WS] [--auto] [--dry-run]
+                               start a planner session if there is plannable
+                               work (ready tickets, or an epic's open
+                               sub-issues) and none is open; close one that
+                               has waited idle_timeout for you, or whose
+                               session ended. --auto (the timer) also needs
+                               room below wip and min_interval since the last
+                               one; ais flow done asks too, when it frees a
+                               slot
   plan done [ID|WS] [--reason TEXT]
                                you decided: the planner is finished, its
                                window closes once you leave it alone
   workspace [WS] [--json]      a workspace's repos, profile and statuses
-  ready [--ws W] [--json]      the workspace's tickets marked ready
+  ready [--ws W] [--json]      the workspace's tickets marked ready, epics with
+                               their sub-issues: what is held, what plannable
   queue add --ws W --title T --tickets T1,T2 --repos R1,R2
             [--profile P] [--priority N] [--after ID|TICKET,...]
             [--notes TEXT | --notes-file F] [--prompt TEXT | --prompt-file F]

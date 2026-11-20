@@ -85,11 +85,20 @@ func sessionByID(sessions []api.Session, id string) *api.Session {
 	return nil
 }
 
+// planMode is who asks for a planner, which decides the checks it passes.
+type planMode int
+
+const (
+	planByHand    planMode = iota // ais flow plan WS: only needs work to plan
+	planScheduled                 // the timer (--auto): work, room, min_interval
+	planAfterDone                 // a session finished: work and room
+)
+
 func cmdPlan(args []string) error {
 	if len(args) > 0 && args[0] == "done" {
 		return cmdPlanDone(args[1:])
 	}
-	o, err := parseOpts(args, []string{"--ws"}, []string{"--dry-run"}, map[string]string{"-n": "--dry-run", "-w": "--ws"})
+	o, err := parseOpts(args, []string{"--ws"}, []string{"--dry-run", "--auto"}, map[string]string{"-n": "--dry-run", "-w": "--ws"})
 	if err != nil {
 		return err
 	}
@@ -112,7 +121,18 @@ func cmdPlan(args []string) error {
 		return err
 	}
 	defer db.Close()
-	dry := o.flags["--dry-run"]
+	mode := planByHand
+	if o.flags["--auto"] {
+		mode = planScheduled
+	}
+	return planWorkspace(db, cfg, w, mode, o.flags["--dry-run"])
+}
+
+// planWorkspace settles the open planner, then starts one if the mode's
+// checks pass: plannable work always; room for more sessions (running plus
+// queued below wip) unless asked by hand; and min_interval since the last
+// planner started, for the timer only.
+func planWorkspace(db *DB, cfg *Config, w *Workspace, mode planMode, dry bool) error {
 	if err := closeDecidedPlanners(db, cfg, dry); err != nil {
 		return err
 	}
@@ -134,22 +154,46 @@ func cmdPlan(args []string) error {
 		}
 	}
 
-	// 2. Anything to plan?
-	items, err := sourceFor(w, db).Ready()
+	// 2. Room for what it would propose?
+	if mode != planByHand {
+		if full, why, err := noRoom(db, cfg, w); err != nil {
+			return err
+		} else if full {
+			note("no planner: %s", why)
+			return nil
+		}
+	}
+	if mode == planScheduled && w.Planner.MinInterval > 0 {
+		var last string
+		db.QueryRow(`SELECT COALESCE(MAX(started_at), '') FROM planners WHERE workspace = ?`, w.Name).Scan(&last)
+		if t, ok := parseStamp(last); ok && now().Sub(t) < w.Planner.MinInterval {
+			note("no planner: the last one started %s ago (min_interval %s)", ago(last), w.Planner.MinInterval)
+			return nil
+		}
+	}
+
+	// 3. Anything to plan? Ready tickets, and for an epic its open
+	// sub-issues, that no proposal holds yet.
+	tickets, err := readyWork(w, db)
 	if err != nil {
 		return err
 	}
-	if len(items) == 0 {
-		note("no tickets marked %s; no planner needed", w.Source.Ready)
+	n := plannable(tickets)
+	if n == 0 {
+		if len(tickets) == 0 {
+			note("no tickets marked %s; no planner needed", w.Source.Ready)
+		} else {
+			note("%d ready ticket(s), but nothing in them left to plan; no planner needed", len(tickets))
+		}
 		return nil
 	}
 	if dry {
-		fmt.Fprintf(stdout, "would start a planner for %s: %d ready ticket(s)\n", w.Name, len(items))
+		fmt.Fprintf(stdout, "would start a planner for %s: %d plannable ticket(s)\n", w.Name, n)
 		return nil
 	}
 
-	// 3. Start one. The unique index makes a race between two of these
-	// end with one planner, not two.
+	// 4. Start one. The unique index makes a race between two of these end
+	// with one planner, not two.
 	pl := &Planner{ID: newID("n"), Workspace: w.Name, State: "open", StartedAt: stamp(now())}
 	if _, err := db.Exec(`INSERT INTO planners (id, workspace, state, started_at) VALUES (?, ?, 'open', ?)`,
 		pl.ID, pl.Workspace, pl.StartedAt); err != nil {
@@ -159,7 +203,8 @@ func cmdPlan(args []string) error {
 		}
 		return err
 	}
-	logEvent(db, "planner-started", pl.ID, map[string]any{"workspace": w.Name, "ready": len(items)})
+	logEvent(db, "planner-started", pl.ID, map[string]any{"workspace": w.Name, "plannable": n,
+		"by": map[planMode]string{planByHand: "hand", planScheduled: "timer", planAfterDone: "a finished session"}[mode]})
 	pane, err := openPane(w.TmuxSession, home())
 	if err == nil {
 		err = typeInto(pane, shellJoin([]string{ais.Self(), "flow", "start", "--planner", pl.ID}))
@@ -168,9 +213,35 @@ func cmdPlan(args []string) error {
 		db.Exec(`UPDATE planners SET state='aborted', closed_at=?, reason=? WHERE id=?`, stamp(now()), "no tmux window: "+err.Error(), pl.ID)
 		return fmt.Errorf("could not open the planner's tmux window: %w", err)
 	}
-	note("started planner %s for %s (%d ready ticket(s)) in %s", pl.ID, w.Name, len(items), w.TmuxSession+":"+pane)
+	note("started planner %s for %s (%d plannable ticket(s)) in %s", pl.ID, w.Name, n, w.TmuxSession+":"+pane)
 	fmt.Fprintln(stdout, pl.ID)
 	return nil
+}
+
+// noRoom is whether the sessions running and queued already fill the
+// limits — then a planner would only add to a queue that cannot move.
+func noRoom(db *DB, cfg *Config, w *Workspace) (bool, string, error) {
+	limits, _, err := effectiveLimits(db, cfg.Limits)
+	if err != nil {
+		return false, "", err
+	}
+	all, err := countFor(db, "")
+	if err != nil {
+		return false, "", err
+	}
+	if all.Running+all.Queued >= limits.WIP {
+		return true, fmt.Sprintf("%d running and %d queued already fill wip %d", all.Running, all.Queued, limits.WIP), nil
+	}
+	if w.WIP > 0 {
+		c, err := countFor(db, w.Name)
+		if err != nil {
+			return false, "", err
+		}
+		if c.Running+c.Queued >= w.WIP {
+			return true, fmt.Sprintf("%s has %d running and %d queued, its wip is %d", w.Name, c.Running, c.Queued, w.WIP), nil
+		}
+	}
+	return false, "", nil
 }
 
 // settleOpenPlanner closes an open planner whose session is gone (aborted)

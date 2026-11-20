@@ -47,6 +47,10 @@ type PlannerConf struct {
 	// CloseAfter is how long a decided planner's window stays open with no
 	// input from you, so its last words can be read.
 	CloseAfter time.Duration
+	// MinInterval is the least time between two scheduled planner starts in
+	// a workspace, so declining everything does not bring the same question
+	// back every hour. A finished session (ais flow done) does not wait.
+	MinInterval time.Duration
 }
 
 type SessionConf struct {
@@ -107,6 +111,11 @@ func loadConfig() (*Config, error) {
 	return parseConfig(raw)
 }
 
+// defaultSchedule checks every hour of the working day. Checks are cheap: a
+// planner only opens when there is plannable work, room for more sessions,
+// and none is open — and one left alone closes itself after idle_timeout.
+const defaultSchedule = "Mon..Fri *-*-* 08..20:00:00"
+
 const defaultSessionPrompt = "/work-tickets {tickets}\n\n{notes}"
 
 func parseConfig(raw map[string]any) (*Config, error) {
@@ -157,10 +166,11 @@ func parseConfig(raw map[string]any) (*Config, error) {
 			Profile:  r.str(pl, "profile", where+".planner.profile", w.Profile),
 			Prompt:   r.str(pl, "prompt", where+".planner.prompt", "/plan-sessions "+name),
 			Cwd:      ais.ExpandPath(r.str(pl, "cwd", where+".planner.cwd", "")),
-			Schedule: r.str(pl, "schedule", where+".planner.schedule", "Mon..Fri *-*-* 09,14:00:00"),
+			Schedule: r.str(pl, "schedule", where+".planner.schedule", defaultSchedule),
 		}
 		w.Planner.IdleTimeout = r.duration(pl, "idle_timeout", where+".planner.idle_timeout", 48*time.Hour)
 		w.Planner.CloseAfter = r.durationOrZero(pl, "close_after", where+".planner.close_after", 5*time.Minute)
+		w.Planner.MinInterval = r.durationOrZero(pl, "min_interval", where+".planner.min_interval", 2*time.Hour)
 		se := r.table(t, "session", "["+where+".session]")
 		w.Session = SessionConf{Prompt: r.str(se, "prompt", where+".session.prompt", defaultSessionPrompt)}
 		c.Workspaces[name] = w
