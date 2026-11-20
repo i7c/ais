@@ -1,4 +1,6 @@
 __pycache__/
 *.ais.bak
-tsm/tsm
-tsm/dist/
+cmd/tsm/tsm
+/tsm
+cmd/tsm/dist/
+dist/

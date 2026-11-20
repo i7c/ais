@@ -9,14 +9,14 @@ bind-key a display-popup -E -w 90% -h 80% -T " tsm " "tsm"
 
 tsm holds no state of its own. tmux is the record of what exists — read in
 one `list-panes` call each time you open it, and once a second while it is
-open — and [ais](../README.md), when it is installed, adds what it knows about
+open — and [ais](../../README.md), when it is installed, adds what it knows about
 the processes it started: what an agent is for, whether it is calling for
 you, and which ended sessions can be picked up again.
 
 ## Build
 
 ```
-cd tsm && go build -o ~/.local/bin/tsm .
+go build -o ~/.local/bin/tsm ./cmd/tsm     # from the repository root
 ```
 
 It needs the `ais` from this repository (`ais state` is its API); point

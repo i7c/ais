@@ -168,7 +168,7 @@ stdin; it answers `{"result": "shown"}` or `{"result": "suppressed"}`, or
 declines by exiting non-zero, and ais then delivers it itself. With
 `sink = ["~/.local/bin/tsm", "notify", "--stdin"]`, notifications raised on a
 server reach the laptop looking at it through `tsm relay` — see
-[tsm](tsm/README.md#notifications-from-anywhere-tsm-relay).
+[tsm](cmd/tsm/README.md#notifications-from-anywhere-tsm-relay).
 
 ## Files
 
@@ -180,7 +180,7 @@ Anything else is the harness's own: `ais install` touches `~/.claude/` or
 
 ## tsm
 
-[`tsm/`](tsm/README.md) is a tmux session manager built on top of ais: one
+[`cmd/tsm/`](cmd/tsm/README.md) is a tmux session manager built on top of ais: one
 popup over every session, window and pane, with the agents ais started
 labelled, the ones calling for you first, and ended sessions a key away from
 restarting. It reads ais only through `ais state` and `ais env`.
@@ -208,7 +208,7 @@ bind-key a display-popup -E -w 80% -h 60% -T " ais " \
   "~/git/ais/ais select"
 ```
 
-(or bind `a` to [tsm](tsm/README.md), which covers `select` and more)
+(or bind `a` to [tsm](cmd/tsm/README.md), which covers `select` and more)
 
 Picking a session from that popup switches the underlying client and the
 popup closes on its own. Don't pass `--client '#{client_name}'` — popups hand
