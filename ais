@@ -820,7 +820,7 @@ def reap(sessions: list[dict]) -> int:
     panes = pane_locations()  # one tmux call for the whole sweep
     reaped = 0
     for s in candidates:
-        pid = s.get("pid")
+        pid = s.get("pid") or s.get("launcher_pid")  # see launch()
         loc = s.get("tmux") or {}
         # pids get reused, so require both signals before declaring death
         if process_alive(pid) and pane_exists(loc.get("pane_id"), panes):
@@ -1591,6 +1591,11 @@ def launch(session: dict, argv: list[str], settings: dict, dry_run: bool) -> int
 
     harness = session["harness"]
     wanted = session.pop("worktree_request", None)
+    # Until the harness exists and has a pid of its own, ais is the process
+    # that says whether the session is alive: without it, a reader reaping in
+    # that moment (tsm polls state constantly) would bury a session that is
+    # only starting.
+    session["launcher_pid"] = os.getpid()
     if dry_run:
         session["id"] = new_id({s.get("id") for s in read_sessions()})
     else:
