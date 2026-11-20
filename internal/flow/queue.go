@@ -182,7 +182,10 @@ func cmdQueueAdd(args []string) error {
 
 	p := &Proposal{ID: newID("p"), Workspace: w.Name, Title: title, Tickets: tickets, Repos: repos,
 		Profile: profile, Prompt: prompt, CustomPrompt: custom, Notes: notes, Priority: priority,
-		After: after, State: "queued", PlannerID: plannerFromEnv(), CreatedAt: stamp(now())}
+		After: after, State: "queued", CreatedAt: stamp(now())}
+	if pl, err := plannerOfSession(db, getenv("AIS_SESSION")); err == nil && pl != nil {
+		p.PlannerID = pl.ID
+	}
 	err = db.tx(func(tx *sql.Tx) error {
 		// A ticket is worked on by one session at a time.
 		held, err := proposals(tx, activeStates)
@@ -224,8 +227,6 @@ func cmdQueueAdd(args []string) error {
 	fmt.Fprintln(stdout, p.ID)
 	return nil
 }
-
-func plannerFromEnv() string { return getenv("AIS_FLOW_PLANNER") }
 
 // checkRepos keeps the names the workspace knows, in order, refusing others.
 func checkRepos(w *Workspace, names []string) ([]string, error) {

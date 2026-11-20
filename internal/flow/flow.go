@@ -12,6 +12,14 @@ const usageText = `usage: ais flow <command> [options]
 
 Planned and dispatched sessions: see docs/flow-proposal.md.
 
+  plan [WS] [--dry-run]        start a planner session if there are ready
+                               tickets and none is open; close one that has
+                               waited idle_timeout for you, or whose session
+                               ended (what the planner timer runs)
+  plan done [ID|WS] [--reason TEXT]
+                               you decided: the planner is finished, its
+                               window closes once you leave it alone
+  workspace [WS] [--json]      a workspace's repos, profile and statuses
   ready [--ws W] [--json]      the workspace's tickets marked ready
   queue add --ws W --title T --tickets T1,T2 --repos R1,R2
             [--profile P] [--priority N] [--after ID|TICKET,...]
@@ -55,7 +63,13 @@ var stdout io.Writer = os.Stdout
 // Main runs "ais flow" with args (after "flow") and returns the exit code.
 func Main(args []string) int {
 	if len(args) > 0 && args[0] == "start" {
-		code, err := cmdStart(args[1:])
+		var code int
+		var err error
+		if len(args) == 3 && args[1] == "--planner" {
+			code, err = cmdStartPlanner(args[2])
+		} else {
+			code, err = cmdStart(args[1:])
+		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "ais flow: %s\n", err)
 		}
@@ -100,6 +114,10 @@ func run(args []string) error {
 			return cmdQueueCancel(rest)
 		}
 		return usagef("unknown queue command %q; try add, ls, show, edit, cancel", sub)
+	case "plan":
+		return cmdPlan(rest)
+	case "workspace", "workspaces", "ws":
+		return cmdWorkspace(rest)
 	case "dispatch":
 		return cmdDispatch(rest)
 	case "done":

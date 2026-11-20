@@ -76,6 +76,7 @@ func publicSession(r *Record, cfg config, host string) api.Session {
 		CanFork:       here && conversation != "" && conf != nil && len(conf.Fork) > 0,
 		LastInputAt:   r.LastInputAt,
 		FlowProposal:  r.FlowProposal,
+		FlowPlanner:   r.FlowPlanner,
 		Notifications: notes,
 	}
 }

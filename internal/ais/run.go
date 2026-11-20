@@ -155,6 +155,7 @@ func cmdRun(a runArgs, harnessArgv []string) int {
 		// sessionEnv), so a session the agent starts itself is not taken for
 		// the proposal's.
 		FlowProposal: os.Getenv("AIS_FLOW_PROPOSAL"),
+		FlowPlanner:  os.Getenv("AIS_FLOW_PLANNER"),
 	}
 	want := many
 	if root != "" {
@@ -277,7 +278,7 @@ func inheritedEnv() map[string]string {
 var sessionEnv = []string{
 	"AIS_SESSION", "AIS_SIBLING", "AIS_PROFILE", "AIS_HARNESS",
 	"AIS_SESSION_DESCRIPTION", "AIS_WORKTREE", "AIS_WORKTREE_BASE",
-	"AIS_REPO_MAIN", "AIS_FLOW_PROPOSAL",
+	"AIS_REPO_MAIN", "AIS_FLOW_PROPOSAL", "AIS_FLOW_PLANNER",
 }
 
 // pickSession is the one session whose id starts with wanted.

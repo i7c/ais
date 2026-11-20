@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/i7c/ais/internal/ais"
@@ -45,6 +46,44 @@ WantedBy=timers.target
 	}
 }
 
+// plannerUnits run "ais flow plan <ws>" on each workspace's schedule: one
+// template service, one timer per workspace (a timer's OnCalendar cannot
+// come from its instance name).
+func plannerUnits(bin string, cfg *Config) []unit {
+	env := "Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin\n"
+	if h := os.Getenv("AIS_HOME"); h != "" {
+		env += "Environment=AIS_HOME=" + h + "\n"
+	}
+	units := []unit{{"ais-flow-plan@.service", `# Written by "ais flow install"; it rewrites this file.
+[Unit]
+Description=ais flow: start a planner for workspace %i when tickets are ready
+
+[Service]
+Type=oneshot
+` + env + `ExecStart=` + bin + ` flow plan %i
+`}}
+	var names []string
+	for n := range cfg.Workspaces {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		units = append(units, unit{"ais-flow-plan-" + n + ".timer", `# Written by "ais flow install"; it rewrites this file.
+[Unit]
+Description=ais flow: planner check for workspace ` + n + `
+
+[Timer]
+OnCalendar=` + cfg.Workspaces[n].Planner.Schedule + `
+Unit=ais-flow-plan@` + n + `.service
+Persistent=false
+
+[Install]
+WantedBy=timers.target
+`})
+	}
+	return units
+}
+
 func unitDir() string {
 	if x := os.Getenv("XDG_CONFIG_HOME"); x != "" {
 		return filepath.Join(x, "systemd", "user")
@@ -62,7 +101,7 @@ func cmdInstall(args []string) error {
 		return err
 	}
 	dry := o.flags["--dry-run"]
-	units := dispatchUnits(ais.Self())
+	units := append(dispatchUnits(ais.Self()), plannerUnits(ais.Self(), cfg)...)
 	dir := unitDir()
 	changed := false
 	for _, u := range units {
@@ -105,11 +144,17 @@ func cmdInstall(args []string) error {
 	}
 	if dry || o.flags["--no-enable"] {
 		if !dry {
-			note("not enabled; systemctl --user enable --now ais-flow-dispatch.timer starts it")
+			note("not enabled; systemctl --user enable --now ais-flow-dispatch.timer (and the ais-flow-plan-* timers) start them")
 		}
 		return nil
 	}
-	steps := [][]string{{"daemon-reload"}, {"enable", "--now", "ais-flow-dispatch.timer"}}
+	enable := []string{"enable", "--now", "ais-flow-dispatch.timer"}
+	for _, u := range units {
+		if strings.HasPrefix(u.name, "ais-flow-plan-") {
+			enable = append(enable, u.name)
+		}
+	}
+	steps := [][]string{{"daemon-reload"}, enable}
 	if !changed {
 		steps = steps[1:]
 	}
@@ -119,6 +164,6 @@ func cmdInstall(args []string) error {
 			return fmt.Errorf("systemctl --user %s: %s", strings.Join(step, " "), strings.TrimSpace(string(out)))
 		}
 	}
-	note("ais-flow-dispatch.timer is on: systemctl --user list-timers 'ais-flow*'; journalctl --user -u ais-flow-dispatch")
+	note("timers are on: systemctl --user list-timers 'ais-flow*'; journalctl --user -u 'ais-flow*'")
 	return nil
 }

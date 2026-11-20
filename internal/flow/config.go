@@ -44,6 +44,9 @@ type PlannerConf struct {
 	Cwd         string
 	Schedule    string // systemd OnCalendar
 	IdleTimeout time.Duration
+	// CloseAfter is how long a decided planner's window stays open with no
+	// input from you, so its last words can be read.
+	CloseAfter time.Duration
 }
 
 type SessionConf struct {
@@ -157,6 +160,7 @@ func parseConfig(raw map[string]any) (*Config, error) {
 			Schedule: r.str(pl, "schedule", where+".planner.schedule", "Mon..Fri *-*-* 09,14:00:00"),
 		}
 		w.Planner.IdleTimeout = r.duration(pl, "idle_timeout", where+".planner.idle_timeout", 48*time.Hour)
+		w.Planner.CloseAfter = r.durationOrZero(pl, "close_after", where+".planner.close_after", 5*time.Minute)
 		se := r.table(t, "session", "["+where+".session]")
 		w.Session = SessionConf{Prompt: r.str(se, "prompt", where+".session.prompt", defaultSessionPrompt)}
 		c.Workspaces[name] = w
@@ -236,6 +240,19 @@ func (r *reader) duration(m map[string]any, key, what string, fallback time.Dura
 	d, err := time.ParseDuration(s)
 	if err != nil || d <= 0 {
 		r.fail("%s must be a duration such as \"48h\"", what)
+		return fallback
+	}
+	return d
+}
+
+func (r *reader) durationOrZero(m map[string]any, key, what string, fallback time.Duration) time.Duration {
+	s := r.str(m, key, what, "")
+	if s == "" {
+		return fallback
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil || d < 0 {
+		r.fail("%s must be a duration such as \"5m\" (or \"0s\")", what)
 		return fallback
 	}
 	return d

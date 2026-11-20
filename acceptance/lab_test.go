@@ -466,6 +466,7 @@ type Session struct {
 	CanFork      bool              `json:"can_fork"`
 	LastInputAt  *string           `json:"last_input_at"`
 	FlowProposal string            `json:"flow_proposal"`
+	FlowPlanner  string            `json:"flow_planner"`
 	Notes        []Notification    `json:"notifications"`
 }
 

@@ -60,6 +60,19 @@ func SessionForProposal(proposal string) string {
 	return id
 }
 
+// SessionForPlanner is the id of a flow planner's session, or "".
+func SessionForPlanner(planner string) string {
+	id := ""
+	catch(func() {
+		for _, r := range readSessions() {
+			if r.FlowPlanner == planner {
+				id = r.ID
+			}
+		}
+	})
+	return id
+}
+
 // ProfileCommand is the command a profile runs.
 func ProfileCommand(cfg map[string]any, profile string) (cmd []string, err error) {
 	err = catch(func() { cmd = harnessSettings(config(cfg), profile).Command })
