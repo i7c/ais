@@ -488,13 +488,14 @@ Each step is one or two commits and usable on its own.
      type aliases.
    - `internal/tmux` is deferred to step 3. tsm's tmux wrapper is tied to its
      snapshot types, so it gets a shared core only once ais needs one.
-3. **Port ais to Go.**
-   - Command by command, until the acceptance suite is green against the Go
-     binary.
-   - Install it beside the Python one, as `ais-go`, for a few days of real
-     use.
-   - Then switch `~/.local/bin/ais` on agalloch and karif, and delete the
-     Python.
+3. **Port ais to Go.** Ported 2026-11-20 (`cmd/ais`, `internal/ais`).
+   - Green against the acceptance suite, and identical to the Python on a
+     copy of the real `~/.ais`.
+   - Installed as `~/.local/bin/ais-go` beside the Python one.
+   - Left: a few days of real use, then switch `~/.local/bin/ais` on
+     agalloch and karif, and delete the Python.
+   - `internal/tmux` stays deferred: ais's tmux helpers are small, and
+     tsm's are tied to its snapshot types.
 4. **ais groundwork for flow.**
    - The `prompt` key on profiles and `ais run --prompt-file`.
    - `ais _activity` with its claude and pi hooks; `last_input_at` in

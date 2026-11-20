@@ -9,9 +9,25 @@ tmux — a session ais can't point back to isn't worth recording.
 
 ## Install
 
+ais is Go (`cmd/ais`); the Python script `./ais` is its predecessor and
+stays until the Go one has proven itself in daily use. Build from the
+repository root:
+
 ```
-./ais install                # claude
-./ais install --harness pi   # pi
+go build -o ~/.local/bin/ais ./cmd/ais    # and tsm: go build -o ~/.local/bin/tsm ./cmd/tsm
+GOOS=darwin GOARCH=arm64 go build -o dist/ais-darwin-arm64 ./cmd/ais   # for a Mac
+```
+
+Both read and write the same `~/.ais`, so they can be swapped at any time.
+`go test ./...` runs the unit tests and the black-box acceptance suite
+(`acceptance/`), which also runs against the Python one:
+`AIS_BIN=./ais go test ./acceptance/`.
+
+Then wire a harness up:
+
+```
+ais install                # claude
+ais install --harness pi   # pi
 ```
 
 Wires a harness up three ways: session flags in `~/.ais/config.toml` so
