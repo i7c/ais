@@ -225,7 +225,7 @@ func noRoom(db *DB, cfg *Config, w *Workspace) (bool, string, error) {
 	if err != nil {
 		return false, "", err
 	}
-	all, err := countFor(db, "")
+	all, err := countFor(db, "", "work")
 	if err != nil {
 		return false, "", err
 	}
@@ -233,7 +233,7 @@ func noRoom(db *DB, cfg *Config, w *Workspace) (bool, string, error) {
 		return true, fmt.Sprintf("%d running and %d queued already fill wip %d", all.Running, all.Queued, limits.WIP), nil
 	}
 	if w.WIP > 0 {
-		c, err := countFor(db, w.Name)
+		c, err := countFor(db, w.Name, "work")
 		if err != nil {
 			return false, "", err
 		}
@@ -412,6 +412,14 @@ func cmdStartPlanner(id string) (int, error) {
 		os.Setenv(k, v)
 	}
 	os.Setenv("AIS_FLOW_PLANNER", pl.ID)
+	os.Setenv("AIS_FLOW_WORKSPACE", w.Name)
+	prompt, warning, err := renderRole(w, "planner", promptData{})
+	if warning != "" {
+		note("%s", warning)
+	}
+	if err != nil {
+		return 1, err
+	}
 	stop := make(chan struct{})
 	done := make(chan struct{})
 	go func() {
@@ -434,7 +442,7 @@ func cmdStartPlanner(id string) (int, error) {
 	}()
 	cwd := orDefault(w.Planner.Cwd, home())
 	code := ais.Main([]string{"run", w.Planner.Profile, "--no-worktree", "--cwd", cwd,
-		"-d", "Plan the next sessions for " + w.Name, "--prompt", w.Planner.Prompt})
+		"-d", "Plan the next sessions for " + w.Name, "--prompt", prompt})
 	select {
 	case <-done:
 	case <-time.After(time.Second):

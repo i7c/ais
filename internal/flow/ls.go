@@ -17,17 +17,27 @@ type counts struct {
 	PlannerSince    string
 }
 
-func countFor(db *DB, ws string) (counts, error) {
+// countFor counts a workspace's proposals ("": all of them) of one kind
+// ("": every kind). Refinement runs count toward the global wip, but not a
+// workspace's (they have refine.wip), nor toward room for a planner.
+func countFor(db *DB, ws string, kind ...string) (counts, error) {
 	var c counts
 	q := `SELECT COUNT(*) FROM proposals WHERE state = ?`
 	args := func(state string) []any {
-		if ws == "" {
-			return []any{state}
+		out := []any{state}
+		if ws != "" {
+			out = append(out, ws)
 		}
-		return []any{state, ws}
+		if len(kind) > 0 {
+			out = append(out, kind[0])
+		}
+		return out
 	}
 	if ws != "" {
 		q += ` AND workspace = ?`
+	}
+	if len(kind) > 0 {
+		q += ` AND kind = ?`
 	}
 	if err := db.QueryRow(q, args("queued")...).Scan(&c.Queued); err != nil {
 		return c, err
@@ -85,7 +95,7 @@ func cmdLs(args []string) error {
 	fmt.Fprintln(tw, "WORKSPACE\tPLANNER\tQUEUED\tRUNNING\tSOURCE")
 	for _, n := range names {
 		w := cfg.Workspaces[n]
-		c, err := countFor(db, n)
+		c, err := countFor(db, n, "work")
 		if err != nil {
 			return err
 		}

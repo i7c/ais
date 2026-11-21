@@ -165,9 +165,13 @@ func TestFlowQueueAdd(t *testing.T) {
 		strings.Join(q[0].Repos, ",") != "backend,iac" {
 		t.Fatalf("queue = %+v", q)
 	}
-	want := "/work-tickets " + ghURL("gpwsoi/backend", 12) + " " + ghURL("gpwsoi/iac", 4) + "\n\nstart with the backend"
-	if q[0].Prompt != want {
-		t.Errorf("prompt = %q, want %q", q[0].Prompt, want)
+	// The built-in work prompt: both tickets, the notes, the repos.
+	want := "Notes from planning:\n\nstart with the backend"
+	for _, part := range []string{"# Work on gpwsoi/backend#12, gpwsoi/iac#4", "- " + ghURL("gpwsoi/backend", 12),
+		"- " + ghURL("gpwsoi/iac", 4), want, "`backend`: `./backend`", "`iac`: `./iac`", "Autonomy ceiling: L2"} {
+		if !strings.Contains(q[0].Prompt, part) {
+			t.Errorf("prompt lacks %q:\n%s", part, q[0].Prompt)
+		}
 	}
 	if show := l.MustFlow("queue", "show", id[:4]).Stdout; !strings.Contains(show, want) {
 		t.Errorf("queue show:\n%s", show)
@@ -238,7 +242,7 @@ func TestFlowQueueEditAndCancel(t *testing.T) {
 		"--repos", "backend").Stdout)
 	l.MustFlow("queue", "edit", id, "--priority", "5", "--notes", "new notes", "--repos", "backend,iac")
 	q := l.Queue()[0]
-	if q.Priority != 5 || q.Notes != "new notes" || !strings.HasSuffix(q.Prompt, "\n\nnew notes") || len(q.Repos) != 2 {
+	if q.Priority != 5 || q.Notes != "new notes" || !strings.Contains(q.Prompt, "Notes from planning:\n\nnew notes") || len(q.Repos) != 2 {
 		t.Errorf("after edit: %+v", q)
 	}
 	l.MustFlow("queue", "edit", id, "--prompt", "do it my way")
@@ -247,7 +251,7 @@ func TestFlowQueueEditAndCancel(t *testing.T) {
 		t.Errorf("notes rewrote a hand-written prompt: %q", q.Prompt)
 	}
 	l.MustFlow("queue", "edit", id, "--prompt", "")
-	if q := l.Queue()[0]; !strings.HasPrefix(q.Prompt, "/work-tickets ") {
+	if q := l.Queue()[0]; !strings.HasPrefix(q.Prompt, "# Work on ") {
 		t.Errorf("an empty --prompt did not go back to the template: %q", q.Prompt)
 	}
 	if r := l.Flow("queue", "edit", id); r.Code == 0 {

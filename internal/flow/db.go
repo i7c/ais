@@ -62,8 +62,53 @@ CREATE TABLE IF NOT EXISTS events (
 	subject TEXT NOT NULL DEFAULT '',
 	detail TEXT NOT NULL DEFAULT ''
 );
+-- The last refinement outcome per ticket, for the version it was made on.
+CREATE TABLE IF NOT EXISTS assessments (
+	url TEXT PRIMARY KEY,
+	workspace TEXT NOT NULL,
+	level TEXT NOT NULL,            -- L1, L2, L3; '' after a run that failed
+	version TEXT NOT NULL,          -- the ticket it was made on (ticketVersion)
+	flag TEXT NOT NULL DEFAULT '',  -- refinement-limit
+	at TEXT NOT NULL,
+	failed_at TEXT NOT NULL DEFAULT ''
+);
 INSERT OR IGNORE INTO meta (key, value) VALUES ('schema', '1');
 `
+
+// columns added after schema 1, to proposals: each is added to a database
+// made before it, so an old flow.db keeps working.
+var addedColumns = [][2]string{
+	{"kind", `TEXT NOT NULL DEFAULT 'work'`}, // work, refine
+	{"autonomy", `TEXT NOT NULL DEFAULT ''`}, // the ceiling it was queued with
+	{"phase", `TEXT NOT NULL DEFAULT ''`},    // plan, approved, finalized
+	{"plan_url", `TEXT NOT NULL DEFAULT ''`}, // the plan PR
+	{"phase_at", `TEXT NOT NULL DEFAULT ''`},
+}
+
+func migrate(db *sql.DB) error {
+	rows, err := db.Query(`SELECT name FROM pragma_table_info('proposals')`)
+	if err != nil {
+		return err
+	}
+	have := map[string]bool{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			rows.Close()
+			return err
+		}
+		have[name] = true
+	}
+	rows.Close()
+	for _, c := range addedColumns {
+		if !have[c[0]] {
+			if _, err := db.Exec(`ALTER TABLE proposals ADD COLUMN ` + c[0] + ` ` + c[1]); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
 
 type DB struct{ *sql.DB }
 
@@ -86,6 +131,10 @@ func openDB() (*DB, error) {
 	}
 	db.SetMaxOpenConns(1)
 	if _, err := db.Exec(schema); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("%s: %w", dbPath(), err)
+	}
+	if err := migrate(db); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("%s: %w", dbPath(), err)
 	}

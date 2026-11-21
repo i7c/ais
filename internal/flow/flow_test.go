@@ -113,7 +113,9 @@ func TestConfigDefaults(t *testing.T) {
 	w := c.Workspaces["soi"]
 	if c.Limits != defaultLimits || w.TmuxSession != "soi" || w.Profile != "claude" || w.Source.Ready != "ready" ||
 		w.Source.InProgress != "In Progress" || !w.Source.Comment || w.Planner.IdleTimeout != 48*time.Hour ||
-		w.Planner.Prompt != "/plan-sessions soi" || w.Session.Prompt != defaultSessionPrompt || w.Repos["backend"] != "/r/b" {
+		w.Planner.Prompt != "" || w.Session.Prompt != "" || w.Session.Autonomy != "L2" || w.Repos["backend"] != "/r/b" ||
+		!w.Refine.Enabled || w.Refine.Status != "refinement" || w.Refine.MaxRounds != 3 || w.Refine.WIP != 1 ||
+		w.Refine.Profile != "claude" {
 		t.Errorf("defaults: limits %+v, workspace %+v", c.Limits, w)
 	}
 	if _, err := c.workspace(""); err != nil {

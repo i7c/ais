@@ -169,6 +169,7 @@ command = [%q]
 flags = ["--from-config"]
 
 prompt = ["--", "{prompt}"]
+batch = ["-p", "--", "{prompt}"]
 
 [profile.fake.env]
 FAKE_PROFILE_ENV = "from-profile"
@@ -404,6 +405,17 @@ type Fake struct {
 	Argv []string
 	Cwd  string
 	Env  map[string]string
+}
+
+// Prompt is the first prompt the fake was given: everything after "--",
+// which it recorded one line per argument, so a prompt of many lines spans
+// many.
+func (f Fake) Prompt() string {
+	i := indexOf(f.Argv, "--")
+	if i < 0 {
+		return ""
+	}
+	return strings.Join(f.Argv[i+1:], "\n")
 }
 
 func (l *Lab) Fake(id string) Fake {

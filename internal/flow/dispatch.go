@@ -54,6 +54,7 @@ func (d *dispatcher) tick() error {
 	if err := d.reconcile(); err != nil {
 		return err
 	}
+	d.sweep()
 	if err := closeDecidedPlanners(d.db, d.cfg, d.dry); err != nil {
 		return err
 	}
@@ -149,8 +150,17 @@ func (d *dispatcher) next() (*Proposal, string, error) {
 			reasons = append(reasons, p.ID+": workspace "+p.Workspace+" is gone from config")
 			continue
 		}
-		if w.WIP > 0 {
-			c, err := countFor(d.db, w.Name)
+		if p.Kind == "refine" {
+			c, err := countFor(d.db, w.Name, "refine")
+			if err != nil {
+				return nil, "", err
+			}
+			if c.Running >= w.Refine.WIP {
+				reasons = append(reasons, fmt.Sprintf("%s: %s has %d of %d refinement runs going", p.ID, w.Name, c.Running, w.Refine.WIP))
+				continue
+			}
+		} else if w.WIP > 0 {
+			c, err := countFor(d.db, w.Name, "work")
 			if err != nil {
 				return nil, "", err
 			}

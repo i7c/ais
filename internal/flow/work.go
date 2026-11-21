@@ -30,6 +30,14 @@ type Ticket struct {
 	// Work is the plannable tickets under (and including) this one: what a
 	// planner can propose sessions for.
 	Work []string `json:"work"`
+	// Assessment is what refinement found, when it ran; Pending says why a
+	// ticket that is otherwise free is not plannable yet: "assessing" (no
+	// current assessment), "refinement" (waiting on its author), "still L1"
+	// (back in ready, unchanged since it was sent to its author).
+	Assessment *Assessment `json:"assessment,omitempty"`
+	Pending    string      `json:"pending,omitempty"`
+	// needsAssessment: free, but refinement has not seen this version.
+	needsAssessment bool
 }
 
 // maxDepth bounds how far down sub-issues are followed.
@@ -47,15 +55,18 @@ type issueInfo struct {
 	State     string
 	SubIssues []subIssueNode
 	Blockers  []string // open ones only
+	Version   string   // ticketVersion of its title and body
 }
 
 // issueInfoOf asks GitHub; a variable for tests.
 var issueInfoOf = func(url string) (issueInfo, error) {
-	out, err := ghRunner("issue", "view", url, "--json", "state,subIssues,blockedBy")
+	out, err := ghRunner("issue", "view", url, "--json", "title,body,state,subIssues,blockedBy")
 	if err != nil {
 		return issueInfo{}, err
 	}
 	var data struct {
+		Title     string `json:"title"`
+		Body      string `json:"body"`
 		State     string `json:"state"`
 		SubIssues struct {
 			Nodes []subIssueNode `json:"nodes"`
@@ -67,7 +78,8 @@ var issueInfoOf = func(url string) (issueInfo, error) {
 	if err := json.Unmarshal(out, &data); err != nil {
 		return issueInfo{}, fmt.Errorf("gh issue view %s: %w", url, err)
 	}
-	info := issueInfo{State: data.State, SubIssues: data.SubIssues.Nodes}
+	body, ref := splitRefinement(data.Body)
+	info := issueInfo{State: data.State, SubIssues: data.SubIssues.Nodes, Version: ticketVersion(data.Title, body, ref)}
 	for _, b := range data.BlockedBy.Nodes {
 		if b.State == "OPEN" {
 			info.Blockers = append(info.Blockers, b.URL)
@@ -78,17 +90,26 @@ var issueInfoOf = func(url string) (issueInfo, error) {
 
 // workSet is the board and the queue, read once, for building Tickets.
 type workSet struct {
-	w     *Workspace
-	board map[string]Item   // url -> board item
-	held  map[string]string // url -> proposal holding it
+	w      *Workspace
+	db     *DB
+	board  map[string]Item   // url -> board item
+	held   map[string]string // url -> proposal holding it
+	refine bool              // refinement gates planning in this workspace
 }
 
-func newWorkSet(w *Workspace, db *DB, src *project) (*workSet, error) {
+func newWorkSet(w *Workspace, db *DB, src Source) (*workSet, error) {
 	items, err := src.Items()
 	if err != nil {
 		return nil, err
 	}
-	ws := &workSet{w: w, board: map[string]Item{}, held: map[string]string{}}
+	ws := &workSet{w: w, db: db, board: map[string]Item{}, held: map[string]string{}}
+	if w.Refine.Enabled {
+		ok, err := src.HasStatus(w.Refine.Status)
+		if err != nil {
+			return nil, err
+		}
+		ws.refine = ok
+	}
 	for _, it := range items {
 		ws.board[it.URL] = it
 	}
@@ -136,6 +157,30 @@ func (ws *workSet) ticket(url, title, state string, depth int) (Ticket, error) {
 	}
 	busy := t.Status == ws.w.Source.Scheduled || t.Status == ws.w.Source.InProgress
 	t.Plannable = t.State == "OPEN" && t.HeldBy == "" && !busy && t.OpenSubs == 0 && len(t.BlockedBy) == 0
+	if ws.refine {
+		if t.Status == ws.w.Refine.Status {
+			t.Plannable, t.Pending = false, "refinement"
+		}
+		a, err := assessmentOf(ws.db, url)
+		if err != nil {
+			return t, err
+		}
+		if a != nil && a.Level != "" {
+			a.Current = a.Version == info.Version
+			t.Assessment = a
+		}
+		if t.Plannable {
+			switch {
+			case a == nil || a.Level == "" || !a.Current:
+				t.Plannable, t.Pending, t.needsAssessment = false, "assessing", true
+				if a != nil && a.FailedAt != "" {
+					t.Pending = "assessing (the last run failed " + ago(a.FailedAt) + " ago)"
+				}
+			case a.Level == "L1":
+				t.Plannable, t.Pending = false, "still L1: its questions are unanswered"
+			}
+		}
+	}
 	if t.Plannable {
 		t.Work = append(t.Work, url)
 	}

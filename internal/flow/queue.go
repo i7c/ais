@@ -32,10 +32,15 @@ type Proposal struct {
 	StartedAt    string   `json:"started_at"`
 	DoneAt       string   `json:"done_at"`
 	Manual       bool     `json:"manual"`
+	Kind         string   `json:"kind"`               // work, or refine (a headless refinement run)
+	Autonomy     string   `json:"autonomy,omitempty"` // the ceiling it was queued with
+	Phase        string   `json:"phase,omitempty"`    // plan, approved, finalized: where its plan PR stands
+	PlanURL      string   `json:"plan_url,omitempty"`
+	PhaseAt      string   `json:"phase_at,omitempty"`
 }
 
 const proposalCols = `id, workspace, title, tickets, repos, profile, prompt, custom_prompt, notes, priority,
-	after, state, planner_id, created_at, ais_session, started_at, done_at, manual`
+	after, state, planner_id, created_at, ais_session, started_at, done_at, manual, kind, autonomy, phase, plan_url, phase_at`
 
 type scanner interface{ Scan(dest ...any) error }
 
@@ -44,7 +49,7 @@ func scanProposal(row scanner) (*Proposal, error) {
 	var tickets, repos, after string
 	if err := row.Scan(&p.ID, &p.Workspace, &p.Title, &tickets, &repos, &p.Profile, &p.Prompt, &p.CustomPrompt,
 		&p.Notes, &p.Priority, &after, &p.State, &p.PlannerID, &p.CreatedAt, &p.AisSession, &p.StartedAt,
-		&p.DoneAt, &p.Manual); err != nil {
+		&p.DoneAt, &p.Manual, &p.Kind, &p.Autonomy, &p.Phase, &p.PlanURL, &p.PhaseAt); err != nil {
 		return nil, err
 	}
 	p.Tickets, p.Repos, p.After = fromJSON(tickets), fromJSON(repos), fromJSON(after)
@@ -93,15 +98,29 @@ func findProposal(db *DB, ref string) (*Proposal, error) {
 // active is the states in which a proposal holds its tickets.
 const activeStates = `state IN ('queued', 'starting', 'running')`
 
-func renderPrompt(w *Workspace, tickets []string, notes string) string {
-	text := strings.ReplaceAll(w.Session.Prompt, "{tickets}", strings.Join(tickets, " "))
-	text = strings.ReplaceAll(text, "{notes}", notes)
-	return strings.TrimRight(text, " \n")
+// renderPrompt is a work proposal's prompt from the workspace's work role,
+// as it would start now; flow renders it again when the session starts, so
+// it picks up a later assessment and a newer built-in prompt.
+func renderPrompt(w *Workspace, db *DB, p *Proposal) string {
+	text, _, err := renderRole(w, "work", workData(w, db, p))
+	if err != nil {
+		return "(the work prompt does not render: " + err.Error() + ")"
+	}
+	return text
+}
+
+// insertProposal writes a new proposal.
+func insertProposal(tx execer, p *Proposal) error {
+	_, err := tx.Exec(`INSERT INTO proposals (`+proposalCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		p.ID, p.Workspace, p.Title, toJSON(p.Tickets), toJSON(p.Repos), p.Profile, p.Prompt, p.CustomPrompt,
+		p.Notes, p.Priority, toJSON(p.After), p.State, p.PlannerID, p.CreatedAt, "", "", "", false,
+		orDefault(p.Kind, "work"), p.Autonomy, "", "", "")
+	return err
 }
 
 func cmdQueueAdd(args []string) error {
 	o, err := parseOpts(args,
-		[]string{"--ws", "--title", "--tickets", "--repos", "--profile", "--priority", "--after", "--notes", "--notes-file", "--prompt", "--prompt-file"},
+		[]string{"--ws", "--title", "--tickets", "--repos", "--profile", "--priority", "--after", "--notes", "--notes-file", "--prompt", "--prompt-file", "--autonomy"},
 		nil, map[string]string{"-w": "--ws", "-t": "--title"})
 	if err != nil {
 		return err
@@ -161,8 +180,9 @@ func cmdQueueAdd(args []string) error {
 	if err != nil {
 		return err
 	}
-	if !custom {
-		prompt = renderPrompt(w, tickets, notes)
+	autonomy, err := autonomyOpt(o)
+	if err != nil {
+		return err
 	}
 
 	db, err := openDB()
@@ -193,7 +213,10 @@ func cmdQueueAdd(args []string) error {
 
 	p := &Proposal{ID: newID("p"), Workspace: w.Name, Title: title, Tickets: tickets, Repos: repos,
 		Profile: profile, Prompt: prompt, CustomPrompt: custom, Notes: notes, Priority: priority,
-		After: after, State: "queued", CreatedAt: stamp(now())}
+		After: after, State: "queued", CreatedAt: stamp(now()), Kind: "work", Autonomy: autonomy}
+	if !custom {
+		p.Prompt = renderPrompt(w, db, p)
+	}
 	if pl, err := plannerOfSession(db, getenv("AIS_SESSION")); err == nil && pl != nil {
 		p.PlannerID = pl.ID
 	}
@@ -210,9 +233,7 @@ func cmdQueueAdd(args []string) error {
 				}
 			}
 		}
-		_, err = tx.Exec(`INSERT INTO proposals (`+proposalCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			p.ID, p.Workspace, p.Title, toJSON(p.Tickets), toJSON(p.Repos), p.Profile, p.Prompt, p.CustomPrompt,
-			p.Notes, p.Priority, toJSON(p.After), p.State, p.PlannerID, p.CreatedAt, "", "", "", false)
+		err = insertProposal(tx, p)
 		if err == nil {
 			logEvent(tx, "queued", p.ID, map[string]any{"title": p.Title, "tickets": p.Tickets, "planner": p.PlannerID})
 		}
@@ -237,6 +258,19 @@ func cmdQueueAdd(args []string) error {
 	}
 	fmt.Fprintln(stdout, p.ID)
 	return nil
+}
+
+// autonomyOpt is --autonomy: a level, or "" when not given.
+func autonomyOpt(o opts) (string, error) {
+	v, ok := o.one("--autonomy")
+	if !ok || v == "" {
+		return "", nil
+	}
+	v = strings.ToUpper(v)
+	if levelRank[v] < 2 {
+		return "", usagef("--autonomy is L2 or L3: an L1 ticket is refined, not worked on")
+	}
+	return v, nil
 }
 
 // checkRepos keeps the names the workspace knows, in order, refusing others.
@@ -380,7 +414,7 @@ func cmdQueueShow(args []string) error {
 
 func cmdQueueEdit(args []string) error {
 	o, err := parseOpts(args,
-		[]string{"--title", "--priority", "--repos", "--after", "--notes", "--notes-file", "--prompt", "--prompt-file", "--profile"},
+		[]string{"--title", "--priority", "--repos", "--after", "--notes", "--notes-file", "--prompt", "--prompt-file", "--profile", "--autonomy"},
 		nil, map[string]string{"-t": "--title"})
 	if err != nil {
 		return err
@@ -448,26 +482,32 @@ func cmdQueueEdit(args []string) error {
 	if notesGiven {
 		p.Notes, changed = notes, append(changed, "notes")
 	}
+	if _, ok := o.one("--autonomy"); ok {
+		if p.Autonomy, err = autonomyOpt(o); err != nil {
+			return err
+		}
+		changed = append(changed, "autonomy")
+	}
 	prompt, promptGiven, err := o.text("--prompt")
 	if err != nil {
 		return err
 	}
 	switch {
 	case promptGiven && prompt == "":
-		// An empty prompt goes back to the template.
-		p.CustomPrompt, p.Prompt, changed = false, renderPrompt(w, p.Tickets, p.Notes), append(changed, "prompt")
+		// An empty prompt goes back to the workspace's.
+		p.CustomPrompt, p.Prompt, changed = false, renderPrompt(w, db, p), append(changed, "prompt")
 	case promptGiven:
 		p.CustomPrompt, p.Prompt, changed = true, prompt, append(changed, "prompt")
-	case notesGiven && !p.CustomPrompt:
-		p.Prompt = renderPrompt(w, p.Tickets, p.Notes)
+	case !p.CustomPrompt:
+		p.Prompt = renderPrompt(w, db, p)
 	}
 	if len(changed) == 0 {
 		return usagef("nothing to change")
 	}
 	err = db.tx(func(tx *sql.Tx) error {
-		res, err := tx.Exec(`UPDATE proposals SET title=?, priority=?, repos=?, after=?, profile=?, notes=?, prompt=?, custom_prompt=?
+		res, err := tx.Exec(`UPDATE proposals SET title=?, priority=?, repos=?, after=?, profile=?, notes=?, prompt=?, custom_prompt=?, autonomy=?
 			WHERE id=? AND state='queued'`, p.Title, p.Priority, toJSON(p.Repos), toJSON(p.After), p.Profile, p.Notes,
-			p.Prompt, p.CustomPrompt, p.ID)
+			p.Prompt, p.CustomPrompt, p.Autonomy, p.ID)
 		if err != nil {
 			return err
 		}

@@ -68,9 +68,9 @@ func TestFlowDispatch(t *testing.T) {
 			t.Errorf("%s worktree on %q", repo, b)
 		}
 	}
-	argv := l.Fake(s1).Argv
-	if n := len(argv); argv[n-2] != "--" || !strings.HasPrefix(argv[n-1], "/work-tickets https://github.com/gpwsoi/backend/issues/12") {
-		t.Errorf("argv = %q", argv)
+	if p := l.Fake(s1).Prompt(); !strings.HasPrefix(p, "# Work on gpwsoi/backend#12") ||
+		!strings.Contains(p, "- https://github.com/gpwsoi/backend/issues/12") || !strings.Contains(p, "ais flow ticket show") {
+		t.Errorf("prompt = %q", p)
 	}
 	if sess.LastInputAt != nil {
 		t.Errorf("the dispatched prompt counted as your input")

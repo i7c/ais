@@ -7,6 +7,13 @@ URLs "gh issue view" reports as closed), subissues.json ({issue URL: [its
 sub-issue URLs]}), blockedby.json ({issue URL: [URLs blocking it]}), calls.log (every
 call), and an optional "fail" file naming a subcommand ("item-edit",
 "item-list", "comment") that should fail.
+
+Tickets: bodies.json ({issue URL: body}, what "issue edit --body-file"
+writes), closes.json (what "issue close" was asked), created.json (issues
+"issue create" made). The board's statuses are "statuses" (one per line) if
+that file exists. Pull requests: prs.json ({branch: {url, number, state,
+isDraft, body, reviewDecision, title}}); a test approves one by setting its
+reviewDecision.
 """
 import json, os, sys
 
@@ -22,9 +29,18 @@ def opt(name):
 
 fail = open(os.path.join(root, "fail")).read().strip() if os.path.exists(os.path.join(root, "fail")) else ""
 STATUSES = ["Todo", "ready", "scheduled", "In Progress", "Done"]
+if os.path.exists(os.path.join(root, "statuses")):
+    STATUSES = [l.strip() for l in open(os.path.join(root, "statuses")) if l.strip()]
 
 def load():
     return json.load(open(board)) if os.path.exists(board) else {"items": []}
+
+def jload(name, default):
+    path = os.path.join(root, name)
+    return json.load(open(path)) if os.path.exists(path) else default
+
+def jsave(name, data):
+    json.dump(data, open(os.path.join(root, name), "w"))
 
 if args[:2] == ["project", "item-list"]:
     if fail == "item-list":
@@ -53,17 +69,80 @@ elif args[:2] == ["project", "item-edit"]:
         sys.exit("no such item " + str(opt("--id")))
     json.dump(data, open(board, "w"))
 elif args[:2] == ["issue", "view"]:
+    url = args[2]
     path = os.path.join(root, "closed")
     closed = open(path).read().split() if os.path.exists(path) else []
-    subs_path = os.path.join(root, "subissues.json")
-    subs = json.load(open(subs_path)) if os.path.exists(subs_path) else {}
+    subs = jload("subissues.json", {})
     state = lambda u: "CLOSED" if u in closed else "OPEN"
-    nodes = [{"url": u, "title": "sub " + u.rsplit("/", 1)[-1], "state": state(u)} for u in subs.get(args[2], [])]
-    blk_path = os.path.join(root, "blockedby.json")
-    blk = json.load(open(blk_path)) if os.path.exists(blk_path) else {}
-    blockers = [{"url": u, "title": "blocker", "state": state(u)} for u in blk.get(args[2], [])]
-    print(json.dumps({"state": state(args[2]), "subIssues": {"nodes": nodes, "totalCount": len(nodes)},
-                      "blockedBy": {"nodes": blockers, "totalCount": len(blockers)}}))
+    titles = {it["content"]["url"]: it["title"] for it in load()["items"]}
+    titles.update({c["url"]: c["title"] for c in jload("created.json", [])})
+    title = lambda u: titles.get(u, "ticket " + u.rsplit("/", 1)[-1])
+    nodes = [{"url": u, "title": "sub " + u.rsplit("/", 1)[-1], "state": state(u)} for u in subs.get(url, [])]
+    blk = jload("blockedby.json", {})
+    blockers = [{"url": u, "title": "blocker", "state": state(u)} for u in blk.get(url, [])]
+    parent = next(({"url": p, "title": title(p), "state": state(p)} for p, kids in subs.items() if url in kids), None)
+    comments = [{"author": {"login": "ais"}, "createdAt": "2026-11-21T10:00:00Z", "body": c["body"]}
+                for c in jload("comments.json", []) if c["url"] == url]
+    print(json.dumps({"url": url, "number": int(url.rsplit("/", 1)[-1]), "title": title(url),
+                      "body": jload("bodies.json", {}).get(url, ""), "state": state(url), "stateReason": "",
+                      "issueType": None, "labels": [], "comments": comments, "parent": parent,
+                      "subIssues": {"nodes": nodes, "totalCount": len(nodes)},
+                      "blockedBy": {"nodes": blockers, "totalCount": len(blockers)},
+                      "closedByPullRequestsReferences": []}))
+elif args[:2] == ["issue", "edit"]:
+    bodies = jload("bodies.json", {})
+    bodies[args[2]] = sys.stdin.read()
+    jsave("bodies.json", bodies)
+elif args[:2] == ["issue", "close"]:
+    closes = jload("closes.json", [])
+    closes.append({"url": args[2], "reason": opt("--reason"), "comment": opt("--comment")})
+    jsave("closes.json", closes)
+    with open(os.path.join(root, "closed"), "a") as fh:
+        fh.write(args[2] + "\n")
+elif args[:2] == ["issue", "create"]:
+    created = jload("created.json", [])
+    url = "https://github.com/%s/issues/%d" % (opt("-R"), 900 + len(created))
+    created.append({"url": url, "title": opt("--title"), "body": sys.stdin.read(),
+                    "parent": opt("--parent"), "blocked_by": opt("--blocked-by")})
+    jsave("created.json", created)
+    if opt("--parent"):
+        subs = jload("subissues.json", {})
+        subs.setdefault(opt("--parent"), []).append(url)
+        jsave("subissues.json", subs)
+    print(url)
+elif args[:2] == ["project", "item-add"]:
+    data = load()
+    url = opt("--url")
+    if not any(it["content"]["url"] == url for it in data["items"]):
+        repo, n = url.split("github.com/")[1].split("/issues/")
+        data["items"].append({"id": "PVTI_new_" + n, "status": "Todo", "title": "new " + n,
+                              "content": {"type": "Issue", "url": url, "number": int(n), "repository": repo}})
+        json.dump(data, open(board, "w"))
+elif args[:2] == ["pr", "view"]:
+    prs = jload("prs.json", {})
+    if args[2] not in prs:
+        sys.exit("no pull requests found for branch \"%s\"" % args[2])
+    print(json.dumps(prs[args[2]]))
+elif args[:2] == ["pr", "create"]:
+    prs = jload("prs.json", {})
+    branch = opt("--head")
+    n = 500 + len(prs)
+    prs[branch] = {"url": "https://github.com/gpwsoi/backend/pull/%d" % n, "number": n, "state": "OPEN",
+                   "isDraft": "--draft" in args, "body": sys.stdin.read(), "reviewDecision": "",
+                   "title": opt("--title"), "base": opt("--base")}
+    jsave("prs.json", prs)
+    print(prs[branch]["url"])
+elif args[:2] in (["pr", "edit"], ["pr", "ready"]):
+    prs = jload("prs.json", {})
+    for pr in prs.values():
+        if pr["url"] == args[2]:
+            if args[1] == "edit":
+                pr["body"] = sys.stdin.read()
+            else:
+                pr["isDraft"] = False
+    jsave("prs.json", prs)
+elif args[:2] == ["repo", "view"]:
+    print("gpwsoi/backend")
 elif args[:2] == ["issue", "comment"]:
     if fail == "comment":
         sys.exit("HTTP 502: fake failure")

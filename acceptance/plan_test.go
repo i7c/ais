@@ -59,8 +59,9 @@ func TestFlowPlanLifecycle(t *testing.T) {
 	if s.Cwd != l.Home || s.Tmux.SessionName != "soi" || len(s.Worktree) != 0 || !strings.Contains(s.Description, "soi") {
 		t.Errorf("planner session = %+v", s)
 	}
-	if argv := l.Fake(sid).Argv; argv[len(argv)-1] != "/plan-sessions soi" {
-		t.Errorf("planner argv = %q", argv)
+	if p := l.Fake(sid).Prompt(); !strings.HasPrefix(p, "# Plan the next sessions for `soi`") ||
+		!strings.Contains(p, "ais flow ready --ws soi --json") {
+		t.Errorf("planner prompt = %q", p)
 	}
 	if _, ok := l.Fake(sid).Env["AIS_FLOW_PLANNER"]; ok {
 		t.Errorf("AIS_FLOW_PLANNER leaked into the harness's env")

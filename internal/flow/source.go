@@ -19,6 +19,9 @@ type Item struct {
 	Title  string `json:"title"`
 	Status string `json:"status"`
 	ItemID string `json:"item_id"` // the project item, for setting its status
+	// Autonomy is the board's "Autonomy" field (L1/L2/L3), when it has one:
+	// the highest level a session may work at.
+	Autonomy string `json:"autonomy,omitempty"`
 }
 
 // ticketURL normalises a ticket reference — an issue URL or owner/repo#n —
@@ -35,8 +38,12 @@ func ticketURL(ref string) (string, error) {
 }
 
 // ghRunner runs gh and returns its stdout; a variable for tests.
-var ghRunner = func(args ...string) ([]byte, error) {
+var ghRunner = func(args ...string) ([]byte, error) { return ghRunnerIn("", args...) }
+
+// ghRunnerIn runs gh with stdin, for the bodies it reads from "-".
+var ghRunnerIn = func(stdin string, args ...string) ([]byte, error) {
 	cmd := exec.Command("gh", args...)
+	cmd.Stdin = strings.NewReader(stdin)
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
 	if err := cmd.Run(); err != nil {
@@ -49,13 +56,34 @@ var ghRunner = func(args ...string) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
-// project is a GitHub Projects (v2) board as a workspace's source.
+// Source is the task layer: where a workspace's tickets live, how their
+// status is told, and everything an agent does to a ticket. Agents reach it
+// only through "ais flow ticket", never through the tracker's own tools, so
+// a second source is one more implementation of this, and no prompt changes.
+type Source interface {
+	// The board.
+	Items() ([]Item, error)
+	Ready() ([]Item, error)
+	Find(urls []string) ([]Item, error)
+	SetStatus(items []Item, status string) error
+	HasStatus(status string) (bool, error)
+	// Tickets.
+	Issue(url string) (*Issue, error)
+	Comment(url, body string) error
+	SetBody(url, body string) error
+	Close(url string, notPlanned bool, comment string) error
+	Create(n NewIssue) (string, error)
+}
+
+// project is a GitHub Projects (v2) board as a workspace's source; the
+// tickets on it are GitHub issues.
 type project struct {
+	githubIssues
 	w  *Workspace
 	db *DB
 }
 
-func sourceFor(w *Workspace, db *DB) *project { return &project{w: w, db: db} }
+func sourceFor(w *Workspace, db *DB) Source { return &project{w: w, db: db} }
 
 func (p *project) num() string { return strconv.Itoa(p.w.Source.Project) }
 
@@ -67,10 +95,11 @@ func (p *project) Items() ([]Item, error) {
 	}
 	var data struct {
 		Items []struct {
-			ID      string `json:"id"`
-			Status  string `json:"status"`
-			Title   string `json:"title"`
-			Content struct {
+			ID       string `json:"id"`
+			Status   string `json:"status"`
+			Autonomy string `json:"autonomy"` // an "Autonomy" field, if the board has one
+			Title    string `json:"title"`
+			Content  struct {
 				Type       string `json:"type"`
 				URL        string `json:"url"`
 				Number     int    `json:"number"`
@@ -88,7 +117,7 @@ func (p *project) Items() ([]Item, error) {
 		}
 		items = append(items, Item{
 			URL: it.Content.URL, Repo: it.Content.Repository, Number: it.Content.Number,
-			Title: it.Title, Status: it.Status, ItemID: it.ID,
+			Title: it.Title, Status: it.Status, ItemID: it.ID, Autonomy: it.Autonomy,
 		})
 	}
 	return items, nil
@@ -216,8 +245,32 @@ func (p *project) SetStatus(items []Item, status string) error {
 	return nil
 }
 
-// Comment leaves a note on a ticket.
-func (p *project) Comment(url, body string) error {
-	_, err := ghRunner("issue", "comment", url, "--body", body)
-	return err
+// HasStatus is whether the board's status field has an option of this name.
+func (p *project) HasStatus(status string) (bool, error) {
+	ids, err := p.ids()
+	if err != nil {
+		return false, err
+	}
+	if ids.Options[status] != "" {
+		return true, nil
+	}
+	// The cache may predate the option: look again once.
+	p.db.Exec(`DELETE FROM gh_ids WHERE workspace = ?`, p.w.Name)
+	if ids, err = p.ids(); err != nil {
+		return false, err
+	}
+	return ids.Options[status] != "", nil
+}
+
+// Create opens a ticket and puts it on the board too: a board whose
+// automation adds sub-issues already has it, and adding it again is a no-op.
+func (p *project) Create(n NewIssue) (string, error) {
+	url, err := p.githubIssues.Create(n)
+	if err != nil {
+		return "", err
+	}
+	if _, err := ghRunner("project", "item-add", p.num(), "--owner", p.w.Source.Owner, "--url", url); err != nil {
+		return url, fmt.Errorf("created %s, but could not put it on the board: %w", url, err)
+	}
+	return url, nil
 }

@@ -28,14 +28,14 @@ Planned and dispatched sessions: see docs/flow-proposal.md.
   ready [--ws W] [--json]      the workspace's tickets marked ready, epics with
                                their sub-issues: what is held, what plannable
   queue add --ws W --title T --tickets T1,T2 --repos R1,R2
-            [--profile P] [--priority N] [--after ID|TICKET,...]
+            [--profile P] [--priority N] [--after ID|TICKET,...] [--autonomy L2|L3]
             [--notes TEXT | --notes-file F] [--prompt TEXT | --prompt-file F]
                                queue a session you accepted; its tickets move
                                to the workspace's scheduled status
   queue ls [--ws W] [--all] [--json]
                                the queue, highest priority first
   queue show ID                one proposal, prompt included
-  queue edit ID [--title T] [--priority N] [--repos ...] [--after ...]
+  queue edit ID [--title T] [--priority N] [--repos ...] [--after ...] [--autonomy ...]
                 [--notes ... | --notes-file F] [--prompt ... | --prompt-file F]
   queue cancel ID [--reason TEXT]
                                drop a queued proposal; its tickets go back to
@@ -48,8 +48,20 @@ Planned and dispatched sessions: see docs/flow-proposal.md.
   dispatch [--dry-run]         start queued sessions while the limits allow
                                (what the timer runs every five minutes)
   dispatch --now ID            start one now, past the limits and its "after"
-  done [ID]                    the session's work is finished: frees its slot.
-                               ID is a proposal or session; default: this one
+  done [ID] [--force]          the session's work is finished: frees its slot.
+                               ID is a proposal or session; default: this one.
+                               Refuses while review check finds a plan left
+                               on its branches (--force: anyway)
+  ticket <cmd> REF ...         the task layer, for agents and you: show,
+                               comment, close, new, assess, refine;
+                               ais flow ticket --help
+  review <cmd> ...             a session's plan as a draft PR: open, update,
+                               approve, finalize, check; ais flow review --help
+  refine REF [--ws W]          queue a refinement run for a ticket now, past
+                               its round limit and an unchanged version
+  prompt show ROLE | rubric    the prompts sessions start with (planner, work,
+                               refine), as built in or overridden
+
   install [-n] [--no-enable]   write and enable the systemd user timer
   ls                           workspaces: planner, queue, running, limits used
   log [-n N]                   what flow did, newest first
@@ -136,6 +148,14 @@ func run(args []string) error {
 		return cmdLs(rest)
 	case "log":
 		return cmdLog(rest)
+	case "ticket", "tickets":
+		return cmdTicket(rest)
+	case "prompt", "prompts":
+		return cmdPrompt(rest)
+	case "review":
+		return cmdReview(rest)
+	case "refine":
+		return cmdRefineNow(rest)
 	}
 	return usagef("unknown command %q; try 'ais flow --help'", cmd)
 }
@@ -226,6 +246,25 @@ func (o opts) text(name string) (string, bool, error) {
 		return "", false, err
 	}
 	return strings.TrimRight(string(data), "\n"), true, nil
+}
+
+// file is --x PATH read whole ("-": stdin); ok when it was given.
+func (o opts) file(name string) (string, bool, error) {
+	path, ok := o.one(name)
+	if !ok {
+		return "", false, nil
+	}
+	var data []byte
+	var err error
+	if path == "-" {
+		data, err = io.ReadAll(os.Stdin)
+	} else {
+		data, err = os.ReadFile(path)
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return string(data), true, nil
 }
 
 func contains(list []string, s string) bool {

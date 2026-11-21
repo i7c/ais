@@ -8,6 +8,7 @@ package flow
 
 import (
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -38,9 +39,18 @@ type SourceConf struct {
 	Comment    bool // leave a short comment on a ticket when it is scheduled
 }
 
+// RoleConf is how a role's prompt is made: the built-in one, with
+// Instructions added; or PromptFile instead of it; or Prompt, a literal
+// first prompt (a skill, say) as before prompts were built in.
+type RoleConf struct {
+	Prompt       string // literal; "" = built in
+	PromptFile   string
+	Instructions string // inline, then the file's text
+}
+
 type PlannerConf struct {
+	RoleConf
 	Profile     string
-	Prompt      string
 	Cwd         string
 	Schedule    string // systemd OnCalendar
 	IdleTimeout time.Duration
@@ -54,7 +64,22 @@ type PlannerConf struct {
 }
 
 type SessionConf struct {
-	Prompt string // template: {tickets}, {notes}
+	RoleConf        // Prompt is a template here: {tickets}, {notes}
+	Autonomy string // the ceiling when neither the proposal nor the board names one
+}
+
+// RefineConf is the refinement sweep: tickets that turn ready are assessed
+// by a headless run before any planner sees them.
+type RefineConf struct {
+	RoleConf
+	Enabled   bool
+	Profile   string // needs a batch template
+	Cwd       string
+	Status    string // the board status of a ticket waiting on its author
+	MaxRounds int
+	Sweep     time.Duration // how often the dispatch tick looks
+	Retry     time.Duration // how long a failed run holds its ticket back
+	WIP       int           // refine runs at once in this workspace
 }
 
 type Workspace struct {
@@ -67,6 +92,8 @@ type Workspace struct {
 	Repos       map[string]string // short name -> main checkout
 	Planner     PlannerConf
 	Session     SessionConf
+	Refine      RefineConf
+	RoleConf    // Instructions here go to every role
 }
 
 type Config struct {
@@ -116,8 +143,6 @@ func loadConfig() (*Config, error) {
 // and none is open — and one left alone closes itself after idle_timeout.
 const defaultSchedule = "Mon..Fri *-*-* 08..20:00:00"
 
-const defaultSessionPrompt = "/work-tickets {tickets}\n\n{notes}"
-
 func parseConfig(raw map[string]any) (*Config, error) {
 	c := &Config{Limits: defaultLimits, Workspaces: map[string]*Workspace{}, raw: raw}
 	r := reader{}
@@ -161,10 +186,11 @@ func parseConfig(raw map[string]any) (*Config, error) {
 		for short, path := range r.strings(t, "repos", where+".repos") {
 			w.Repos[short] = ais.ExpandPath(path)
 		}
+		w.RoleConf = r.role(t, where)
 		pl := r.table(t, "planner", "["+where+".planner]")
 		w.Planner = PlannerConf{
+			RoleConf: r.role(pl, where+".planner"),
 			Profile:  r.str(pl, "profile", where+".planner.profile", w.Profile),
-			Prompt:   r.str(pl, "prompt", where+".planner.prompt", "/plan-sessions "+name),
 			Cwd:      ais.ExpandPath(r.str(pl, "cwd", where+".planner.cwd", "")),
 			Schedule: r.str(pl, "schedule", where+".planner.schedule", defaultSchedule),
 		}
@@ -172,7 +198,20 @@ func parseConfig(raw map[string]any) (*Config, error) {
 		w.Planner.CloseAfter = r.durationOrZero(pl, "close_after", where+".planner.close_after", 5*time.Minute)
 		w.Planner.MinInterval = r.durationOrZero(pl, "min_interval", where+".planner.min_interval", 2*time.Hour)
 		se := r.table(t, "session", "["+where+".session]")
-		w.Session = SessionConf{Prompt: r.str(se, "prompt", where+".session.prompt", defaultSessionPrompt)}
+		w.Session = SessionConf{RoleConf: r.role(se, where+".session"),
+			Autonomy: r.level(se, "autonomy", where+".session.autonomy", "L2")}
+		rf := r.table(t, "refine", "["+where+".refine]")
+		w.Refine = RefineConf{
+			RoleConf:  r.role(rf, where+".refine"),
+			Enabled:   r.boolean(rf, "enabled", where+".refine.enabled", true),
+			Profile:   r.str(rf, "profile", where+".refine.profile", w.Profile),
+			Cwd:       ais.ExpandPath(r.str(rf, "cwd", where+".refine.cwd", w.Planner.Cwd)),
+			Status:    r.str(rf, "status", where+".refine.status", "refinement"),
+			MaxRounds: r.positive(rf, "max_rounds", where+".refine.max_rounds", 3),
+			Sweep:     r.durationOrZero(rf, "sweep", where+".refine.sweep", 30*time.Minute),
+			Retry:     r.durationOrZero(rf, "retry", where+".refine.retry", time.Hour),
+			WIP:       r.positive(rf, "wip", where+".refine.wip", 1),
+		}
 		c.Workspaces[name] = w
 	}
 	if r.err != nil {
@@ -266,6 +305,38 @@ func (r *reader) durationOrZero(m map[string]any, key, what string, fallback tim
 		return fallback
 	}
 	return d
+}
+
+// role reads a role's prompt settings: prompt, prompt_file, instructions
+// and instructions_file (both may be given; the inline text comes first).
+func (r *reader) role(m map[string]any, where string) RoleConf {
+	rc := RoleConf{
+		Prompt:       r.str(m, "prompt", where+".prompt", ""),
+		PromptFile:   ais.ExpandPath(r.str(m, "prompt_file", where+".prompt_file", "")),
+		Instructions: strings.TrimSpace(r.str(m, "instructions", where+".instructions", "")),
+	}
+	if rc.Prompt != "" && rc.PromptFile != "" {
+		r.fail("%s: prompt and prompt_file both replace the built-in prompt; pick one", where)
+	}
+	if path := r.str(m, "instructions_file", where+".instructions_file", ""); path != "" {
+		data, err := os.ReadFile(ais.ExpandPath(path))
+		if err != nil {
+			r.fail("%s.instructions_file: %v", where, err)
+		} else if text := strings.TrimSpace(string(data)); text != "" {
+			rc.Instructions = strings.TrimSpace(rc.Instructions + "\n\n" + text)
+		}
+	}
+	return rc
+}
+
+// level reads an autonomy level: L1, L2 or L3.
+func (r *reader) level(m map[string]any, key, what, fallback string) string {
+	v := strings.ToUpper(r.str(m, key, what, fallback))
+	if _, ok := levelRank[v]; !ok {
+		r.fail("%s must be L1, L2 or L3", what)
+		return fallback
+	}
+	return v
 }
 
 func (r *reader) strings(m map[string]any, key, what string) map[string]string {
