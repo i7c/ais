@@ -1,6 +1,6 @@
 # Proposal: autonomy levels, ticket refinement and plan review
 
-Status: **draft, round 3** (2026-11-21)
+Status: **accepted; building** (2026-11-21)
 
 ## 1. What this is for
 
@@ -342,30 +342,38 @@ back. When I'm done, I tell the session "reviewed" and it reads the review.
 
 ### 8.2 Approval removes the plan — in tooling
 
-`ais flow review approve` is the gate. It refuses unless the PR has an approving
-review from me, or I run it myself with `--by-hand`. Then it:
+**`ais flow review approve`** is the gate. It refuses unless the PR has an
+approving review, or it is run with `--by-hand` (the normal path, since GitHub
+won't let me approve a PR pushed as me). It:
 
 1. copies the final plan into the PR description, under "Plan (approved
    <date>)";
-2. **rewrites the branch without every commit carrying `Ais-Plan`.** Those
-   commits touch only the plan file (`review open`/`update` guarantee it), so
-   dropping them can't conflict. Then it force-pushes with lease;
-3. marks the PR ready for review;
-4. records phase `approved` on the proposal.
+2. records phase `approved` on the proposal, and logs who approved and how.
 
-Implementation commits come after this, on the same branch and the same PR.
+**`ais flow review finalize`** removes the plan. The work session runs it once
+the branch holds implementation commits, before it marks the PR ready. It:
 
-**`ais flow review check`** is the safety net. It fails if, in any of the
-session's worktrees, `base..HEAD` contains a commit with `Ais-Plan`, or the
-tree contains `plans/<n>.md` for one of the session's tickets. It runs:
+1. **rewrites the branch without every commit carrying `Ais-Plan`.** Those
+   commits touch only the plan file (`review open`/`update` make them that
+   way), so dropping them can't conflict;
+2. force-pushes with lease;
+3. marks the PR ready for review.
 
-- in `ais flow done` (which refuses to mark the session done while it fails);
-- as a `pre-push` hook that `ais flow start` installs in the session's
-  worktrees, but only after `approve`. Before approval, pushing plan commits
-  is the point.
+It refuses before approval. It also refuses while the branch holds nothing but
+plan commits. Pushing a head that GitHub finds already in the base marks the PR
+*merged*, and a merged PR can't be reopened. That is why dropping waits for
+real commits and is not part of `approve`.
 
-`work-tickets` also runs it explicitly in close-out, so a failure shows up
-while I'm still there.
+**`ais flow review check`** is the safety net. It fails if any of the
+session's worktrees still has, between the base and `HEAD` (or its upstream):
+
+- a commit carrying `Ais-Plan`;
+- a file under `plans/`.
+
+It names the fix (`ais flow review finalize`). **`ais flow done` runs it** and
+refuses to free the slot while it fails; `done --force` overrides. The work
+prompt runs it again in close-out, so a failure shows up while I'm still
+there.
 
 ## 9. The plan document
 
@@ -517,41 +525,70 @@ What skills did well, and how ais keeps it:
 
 ```toml
 [workspace.soi]
-instructions = "~/.ais/workspaces/soi.md"    # appended to every role's prompt
-
-[workspace.soi.ticket]                       # facts, not prose; ais uses them
-issue_repo = "gpwsoi/org"                    #   itself (closing refs, ADR path)
-adr_home = "gpwsoi/adr:adrs/"
-closing_ref = "Fixes {repo}#{n}"
-automation = true
+instructions_file = "~/.ais/workspaces/soi.md"   # added to every role's prompt
+# instructions = "…"                             # the same, inline
 
 [workspace.soi.planner]
-instructions = "Prefer one session per repo."   # appended to this role only
-# prompt_file = "~/.ais/prompts/planner.md"    # full replacement; last resort
-# prompt = "/plan-sessions soi"                # still honoured, as today
+instructions = "Prefer one session per repo."    # added to this role only
+# prompt_file = "~/.ais/prompts/planner.md"      # full replacement; last resort
+# prompt = "/plan-sessions soi"                  # still honoured, as today
+
+[workspace.soi.session]                          # the work role
+instructions_file = "~/.ais/workspaces/soi-work.md"
+autonomy = "L2"
+
+[workspace.soi.refine]
+instructions = "Tickets are written in Portuguese; answer in English."
 ```
 
-- **Append, don't replace.** Most changes are additions, such as "in soi, ADRs
-  go to gpwsoi/adr". Appended instructions keep getting the built-in prompt's
-  fixes.
+- **Add to it, don't replace it.** Most changes are additions, such as "in soi,
+  ADRs go to gpwsoi/adr". Added instructions keep getting the built-in
+  prompt's fixes.
+- **The project facts live in an instructions file.** The facts that sat in
+  `ticket-targets/gpwsoi.md` (issue repo, ADR home, closing reference,
+  automation, issue types, title rules) go into the workspace's
+  `instructions_file`. A structured `[ticket]` table would only be worth it
+  once ais itself needs a fact, and so far none does.
 - **A full replacement records the version it was written against.**
-  `ais flow doctor` warns when the built-in prompt has moved on since.
-- **`prompt` keeps working.** Today's config, which points at a skill, keeps
-  running until I change it.
+  Its first line is `<!-- ais-prompt: work v1 -->`. `ais flow prompt show` and
+  `ais flow start` warn when the built-in prompt's version has moved on.
+- **`prompt` keeps working.** A config that names a skill keeps running until
+  I change it.
 
 ### 12.4 What happens to the skills
 
-- **`plan-sessions`:** deleted once the built-in planner prompt is in. Only
-  flow ever ran it.
-- **`refine-ticket`:** never written as a skill. It is `refine.md` from the
-  start.
-- **`work-tickets`:** I also run it by hand, outside flow. It becomes a thin
-  skill: "run `ais flow prompt show work --tickets <refs>` and follow it". The
-  procedure exists once, in ais, and both paths use it. Its `ticket-targets/`
-  profiles move into the workspace's `[ticket]` config.
-- **`plan-to-tickets`:** stays a skill for now. flow doesn't start it, but it
-  moves to `ais flow ticket new`. It can become a built-in role later with the
-  same thin-skill pattern.
+- **ais relies on no skill.** The planner, work and refinement prompts are all
+  built in.
+- **`work-tickets`** stays as my own skill for sessions I start by hand, and
+  is unchanged. ais never calls it. What I want added to dispatched sessions
+  goes into `[workspace.<ws>.session] instructions`. To start a hand session
+  the way flow would, `ais flow prompt show work --tickets <refs>` prints the
+  built-in prompt.
+- **`plan-sessions`** is no longer used by ais. Deleting it is my call.
+- **`refine-ticket`** is never written as a skill. It is `refine.md`.
+- **`plan-to-tickets`** stays a skill.
 
-**Build plan:** this goes into step 2, with the task layer. The prompts are
-written once, against `ais flow ticket`, rather than migrated twice.
+## 13. Decided while building
+
+These came up while building, and changed the design above:
+
+- **Plan commits are dropped by `review finalize`, not by `approve`**
+  (§8.2). This avoids GitHub marking a PR with no commits left as merged.
+- **No pre-push hook.** The check in `ais flow done` and the close-out step
+  are enough, and a hook would mean managing hooks in every worktree.
+- **The version is a hash of the title and body only.** Comments are left out,
+  because flow's own "scheduled" comments would otherwise make every ticket
+  look changed. My answers go in the body's block, so they still count.
+- **Only an L1 outcome counts as a refinement round.** An L2/L3 assessment
+  writes the block but doesn't add to "round n of 3".
+- **Refine runs count toward the rate limits** (`per_hour`, `per_day`), like
+  any start: they spend the same subscription. They count toward the global
+  `wip`, not the workspace's, and have their own `refine.wip` (1).
+- **A refine run's tickets don't block a planner** from opening. They are
+  simply not plannable until they are assessed.
+- **The refinement status is optional per board.** If the board has no option
+  named `refine.status` (default `refinement`), the sweep logs that and skips
+  the workspace. It never fails the dispatch tick.
+- **Only the work session's prompt is rendered when it starts,** unless it was
+  written by hand. A queued proposal therefore picks up a newer built-in prompt
+  and a later assessment.
