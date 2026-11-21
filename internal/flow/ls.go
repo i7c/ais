@@ -126,7 +126,53 @@ func cmdLs(args []string) error {
 	}
 	fmt.Fprintf(stdout, "\nrunning %d/%d   started in the last hour %d/%d, last 24h %d/%d\n",
 		all.Running, limits.WIP, hour, limits.PerHour, day, limits.PerDay)
-	return listRunning(db)
+	if err := listRunning(db); err != nil {
+		return err
+	}
+	return listWaiting(db)
+}
+
+// listWaiting is what waits on you: plans up for review, and tickets sent
+// back to their author (the last outcome flow recorded for them is L1).
+func listWaiting(db *DB) error {
+	review, err := proposals(db, `state IN ('starting', 'running') AND phase = 'plan'`)
+	if err != nil {
+		return err
+	}
+	if len(review) > 0 {
+		fmt.Fprintln(stdout)
+		tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(tw, "REVIEW\tWS\tTITLE\tPLAN\tWAITING")
+		for _, p := range review {
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", p.ID, p.Workspace, elide(p.Title, 40), p.PlanURL, ago(p.PhaseAt))
+		}
+		if err := tw.Flush(); err != nil {
+			return err
+		}
+	}
+	rows, err := db.Query(`SELECT url, workspace, at FROM assessments WHERE level = 'L1' ORDER BY at`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	var lines [][3]string
+	for rows.Next() {
+		var url, ws, at string
+		if err := rows.Scan(&url, &ws, &at); err != nil {
+			return err
+		}
+		lines = append(lines, [3]string{url, ws, at})
+	}
+	if len(lines) > 0 {
+		fmt.Fprintln(stdout)
+		tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(tw, "REFINEMENT\tWS\tSENT BACK")
+		for _, l := range lines {
+			fmt.Fprintf(tw, "%s\t%s\t%s ago\n", shortTickets([]string{l[0]}), l[1], ago(l[2]))
+		}
+		return tw.Flush()
+	}
+	return rows.Err()
 }
 
 // listRunning shows what holds a slot, and whether its session still runs:
@@ -150,6 +196,9 @@ func listRunning(db *DB) error {
 	fmt.Fprintln(tw, "RUNNING	WS	TITLE	SESSION	SINCE")
 	for _, p := range running {
 		s := orDefault(session[p.ID], "-")
+		if p.Kind == "refine" {
+			s += " (refinement)"
+		}
 		switch {
 		case p.State == "starting":
 			s = "starting"

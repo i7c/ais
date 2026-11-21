@@ -1,6 +1,6 @@
 # Proposal: autonomy levels, ticket refinement and plan review
 
-Status: **accepted; building** (2026-11-21)
+Status: **built** (2026-11-21). Not yet live: the board needs a `refinement` status (§14).
 
 ## 1. What this is for
 
@@ -592,3 +592,35 @@ These came up while building, and changed the design above:
 - **Only the work session's prompt is rendered when it starts,** unless it was
   written by hand. A queued proposal therefore picks up a newer built-in prompt
   and a later assessment.
+
+## 14. As built
+
+| Piece | Where |
+|---|---|
+| Task layer | `internal/flow/source.go` (`Source`), `issues.go` (GitHub issues), `ticket.go` (`ais flow ticket`) |
+| Refinement | `refinement.go` (block, assessments, `assess`/`refine`/`ais flow refine`), `sweep.go`, `start.go` (headless run, self-done) |
+| Plan review | `review.go` (`ais flow review`), the check in `ais flow done` |
+| Prompts | `prompts/{planner,work,refine,rubric}.md`, `prompts.go` (`ais flow prompt`) |
+| Headless runs | `ais run --batch`, `batch` profile templates (`internal/ais`) |
+| Tests | `internal/flow/autonomy_test.go`, `acceptance/autonomy_test.go` |
+
+Verified on 2026-11-21:
+
+- the whole suite is green on agalloch;
+- `ais flow ticket show --context` and `ais flow ready` work read-only against
+  gpwsoi/3;
+- `claude -p -- <multi-line prompt>` runs tools and a subagent, then exits 0.
+
+Not verified:
+
+- pi's `-p`. It was not run, to avoid billing its provider.
+- A real refinement or work session end to end on soi.
+
+To go live on soi:
+
+1. Add a `refinement` option to gpwsoi/3's Status field. Until then the
+   sweep logs `refine-off` and planning works as before.
+2. Move the facts from `work-tickets/references/ticket-targets/gpwsoi.md`
+   into `[workspace.soi] instructions_file`.
+3. Install the new binary. The first `ais flow` command adds the new columns
+   to `flow.db`.

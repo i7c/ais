@@ -214,18 +214,35 @@ know. Each session lists what can be done with it (`can_restart`,
 
 `ais flow` takes tickets from a GitHub project to running agent sessions:
 
+0. **Refinement.** Every five minutes (at most every `refine.sweep`), each
+   ticket that turned plannable is refined by a headless run before any
+   planner sees it. A ticket that says enough to plan from (L2/L3) stays
+   `ready`. One that doesn't (L1) gets the evidence found and its questions
+   written into a block at the end of its body, and moves to `refinement`.
+   You answer in the block and move it back to `ready`, and it is refined
+   again. After `max_rounds` it goes to the planner flagged instead.
 1. **Planner.** A timer checks each workspace hourly on weekdays. When there
    are tickets to plan and room for more sessions, it starts a planner
-   session: an agent with the `plan-sessions` skill, which reads the ready
-   tickets, proposes sessions and waits for you.
+   session, which reads the ready tickets, proposes sessions with an autonomy
+   level each, and waits for you.
 2. **Queue.** You accept some of the proposals. The planner queues them with
    `ais flow queue add`, which moves their tickets to `scheduled`.
 3. **Dispatcher.** A second timer, every five minutes, starts queued sessions
    while the limits allow. Each runs in a new window of the workspace's tmux
    session, with its first prompt and a worktree of each repo it needs. Its
    tickets move to `In Progress`.
-4. **Done.** `ais flow done`, run by you or by the agent when you tell it to,
-   frees the session's slot.
+4. **Review.** A work session puts its plan up as a draft PR
+   (`ais flow review open`) and waits. Nothing is changed before you approve
+   it (`review approve`). Once the branch holds the work, `review finalize`
+   drops the plan commits and marks the PR ready.
+5. **Done.** `ais flow done`, run by you or by the agent when you tell it to,
+   frees the session's slot. It refuses while a plan is left on the
+   session's branches.
+
+Agents reach tickets only through `ais flow ticket` (show, comment, close,
+new, assess, refine), never through `gh`. The prompts every role starts with
+are built into ais, so no skill has to be installed. `ais flow prompt show
+planner|work|refine` prints them.
 
 Nothing runs between timer ticks. State is kept in `~/.ais/flow.db`
 (SQLite). Every session is a normal ais session.
@@ -262,9 +279,25 @@ idle_timeout = "48h"     # close a planner after this long without your input
 min_interval = "2h"      # least time between two timer-started planners
 close_after = "5m"       # close a decided planner's window after this long
 
-[workspace.soi.session]
-prompt = "/work-tickets {tickets}\n\n{notes}"   # first prompt of a dispatched session
+[workspace.soi.session]            # dispatched work sessions
+autonomy = "L2"                    # the ceiling, when neither proposal nor board sets one
+instructions_file = "~/.ais/workspaces/soi-work.md"   # added to the built-in prompt
+# prompt_file = "…"                # replace the built-in prompt (<!-- ais-prompt: work v1 -->)
+# prompt = "/work-tickets {tickets}\n\n{notes}"      # or a literal first prompt, as before
+
+[workspace.soi.refine]             # the headless refinement runs
+# enabled = true                   # needs a "refinement" option in the board's Status field
+# profile = "claude"               # must have a batch template (claude and pi do)
+# max_rounds = 3                   # rounds back to you before it is planned flagged
+# sweep = "30m"                    # how often a dispatch tick looks
+# retry = "1h"                     # how long a failed run holds its ticket back
+# wip = 1                          # runs at once; they also count toward flow.wip
 ```
+
+`instructions`, `instructions_file` and `prompt_file` also go under
+`[workspace.<ws>]` (added to every role), `.planner` and `.refine`. The
+autonomy levels and the readiness check are in `ais flow prompt rubric`. The
+design is in [docs/autonomy-proposal.md](docs/autonomy-proposal.md).
 
 `ais flow install` writes and enables the systemd user units:
 `ais-flow-dispatch.timer` and one `ais-flow-plan-<workspace>.timer` per
@@ -274,8 +307,9 @@ workspace. Run it again after changing a schedule. Logs:
 ### What gets planned
 
 A ticket is plannable when it is open, not already in an active proposal, not
-`scheduled` or `In Progress` on the board, not blocked by an open issue, and
-has no open sub-issues.
+`scheduled`, `In Progress` or `refinement` on the board, not blocked by an
+open issue, and has no open sub-issues. Where refinement is on, it also needs
+an L2 or L3 assessment of its current text.
 
 A ready ticket with open sub-issues is an epic. Its plannable sub-issues are
 proposed instead of the epic. The epic stays `ready` until its last sub-issue
@@ -304,7 +338,11 @@ plannable.
 | `queue ls\|show\|edit\|cancel` | inspect and change the queue; `cancel` moves tickets back to `ready` |
 | `dispatch [--dry-run]` | start queued sessions within the limits (the timer runs this) |
 | `dispatch --now ID` | start one now, past the limits and its dependencies |
-| `done [ID]` | mark a session's work finished and free its slot |
+| `done [ID] [--force]` | mark a session's work finished and free its slot; refuses while a plan is left |
+| `ticket show\|comment\|close\|new\|assess\|refine` | the task layer agents use; `ais flow ticket --help` |
+| `review open\|update\|approve\|finalize\|check` | a session's plan as a draft PR; `ais flow review --help` |
+| `refine REF` | refine a ticket now, one round past the limit if need be |
+| `prompt show ROLE \| rubric` | the prompts sessions start with, as built in or overridden |
 | `limit [KEY VALUE] [--until eod\|HH:MM\|DATE \| --for 3h]` | show the limits, or override one for a while |
 | `ls` | per workspace: open planner, queued, running; limits used |
 | `log [-n N]` | what flow did, newest first |
@@ -312,7 +350,7 @@ plannable.
 
 Tickets are written as issue URLs or `owner/repo#n`. `queue add` takes
 `--after ID|TICKET` (start only after that proposal is done or that ticket is
-closed), `--priority N`, `--notes` and `--prompt`.
+closed), `--priority N`, `--autonomy L2|L3`, `--notes` and `--prompt`.
 
 The design and the decisions behind it are in
 [docs/flow-proposal.md](docs/flow-proposal.md).
@@ -323,7 +361,7 @@ The design and the decisions behind it are in
 |---|---|
 | `~/.ais/config.toml` | profiles, `[worktree]`, `[tmux]`, `[notify]`, `[flow]`, workspaces |
 | `~/.ais/sessions.json` | recorded sessions |
-| `~/.ais/flow.db` | flow's planners, queue, start log and events |
+| `~/.ais/flow.db` | flow's planners, queue, assessments, start log and events |
 | `~/.config/systemd/user/ais-flow-*` | flow's timers, written by `ais flow install` |
 
 ## Development

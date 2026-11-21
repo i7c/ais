@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/i7c/ais/internal/ais"
 )
@@ -48,10 +49,26 @@ func (d *dispatcher) sweepWorkspace(w *Workspace) (int, error) {
 		// Stamped first: a sweep that fails is not retried every tick.
 		d.db.Exec(`INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)`, key, stamp(now()))
 	}
-	if ok, err := sourceFor(w, d.db).HasStatus(w.Refine.Status); err != nil {
+	src := sourceFor(w, d.db)
+	ok, err := src.HasStatus(w.Refine.Status)
+	if err == nil && !ok {
+		// The option may have been added since the ids were cached.
+		if p, isProject := src.(*project); isProject {
+			p.forgetIDs()
+			ok, err = src.HasStatus(w.Refine.Status)
+		}
+	}
+	if err != nil {
 		return 0, err
-	} else if !ok {
-		logEvent(d.db, "refine-off", w.Name, fmt.Sprintf("the board has no %q status", w.Refine.Status))
+	}
+	if !ok {
+		offKey := "refine-off:" + w.Name
+		var said string
+		d.db.QueryRow(`SELECT value FROM meta WHERE key = ?`, offKey).Scan(&said)
+		if t, seen := parseStamp(said); !seen || now().Sub(t) > 24*time.Hour {
+			logEvent(d.db, "refine-off", w.Name, fmt.Sprintf("the board has no %q status, so tickets are planned unrefined", w.Refine.Status))
+			d.db.Exec(`INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)`, offKey, stamp(now()))
+		}
 		return 0, nil
 	}
 	if ok, err := ais.TakesBatch(d.cfg.raw, w.Refine.Profile); err != nil {

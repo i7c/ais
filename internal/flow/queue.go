@@ -348,7 +348,11 @@ func cmdQueueLs(args []string) error {
 	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "ID\tPRI\tSTATE\tWS\tTITLE\tTICKETS\tREPOS\tAFTER")
 	for _, p := range all {
-		fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\n", p.ID, p.Priority, p.State, p.Workspace,
+		state := p.State
+		if p.Phase != "" {
+			state += "/" + p.Phase
+		}
+		fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\n", p.ID, p.Priority, state, p.Workspace,
 			elide(p.Title, 40), shortTickets(p.Tickets), strings.Join(p.Repos, ","), orDefault(strings.Join(shortTickets2(p.After), ","), "-"))
 	}
 	return tw.Flush()
@@ -391,7 +395,8 @@ func cmdQueueShow(args []string) error {
 		return writeJSON(p)
 	}
 	for _, kv := range [][2]string{
-		{"id", p.ID}, {"title", p.Title}, {"workspace", p.Workspace}, {"state", p.State},
+		{"id", p.ID}, {"title", p.Title}, {"kind", p.Kind}, {"workspace", p.Workspace}, {"state", p.State},
+		{"autonomy", orDefault(p.Autonomy, "-")}, {"phase", orDefault(strings.TrimSpace(p.Phase+" "+p.PlanURL), "-")},
 		{"priority", strconv.Itoa(p.Priority)}, {"profile", p.Profile},
 		{"tickets", strings.Join(shortTickets2(p.Tickets), " ")}, {"repos", strings.Join(p.Repos, " ")},
 		{"after", orDefault(strings.Join(shortTickets2(p.After), " "), "-")},
@@ -634,6 +639,8 @@ func cmdReady(args []string) error {
 			what = "held by " + t.HeldBy
 		case len(t.BlockedBy) > 0:
 			what = "blocked by " + shortTickets(t.BlockedBy)
+		case t.Pending != "":
+			what = t.Pending
 		case !t.Plannable:
 			what = orDefault(t.Status, t.State)
 		case len(t.SubIssues) > 0:
@@ -661,8 +668,15 @@ func printSub(tw *tabwriter.Writer, t Ticket, indent string) {
 		what = "held by " + t.HeldBy
 	case len(t.BlockedBy) > 0:
 		what = "blocked by " + shortTickets(t.BlockedBy)
+	case t.Pending != "":
+		what = t.Pending
 	case !t.Plannable:
 		what = t.Status
+	case t.Assessment != nil:
+		what = "plannable, " + t.Assessment.Level
+		if t.Assessment.Flag != "" {
+			what += " (" + t.Assessment.Flag + ")"
+		}
 	}
 	fmt.Fprintf(tw, "%s%s\t%s\t%s\n", indent, shortTickets([]string{t.URL}), elide(t.Title, 58), what)
 	for _, sub := range t.SubIssues {

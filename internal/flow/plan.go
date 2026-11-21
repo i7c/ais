@@ -484,12 +484,15 @@ func cmdWorkspace(args []string) error {
 		Source   string            `json:"source"`
 		Statuses map[string]string `json:"statuses"`
 		WIP      int               `json:"wip"`
+		Autonomy string            `json:"autonomy"` // the default ceiling
+		Refine   bool              `json:"refine"`   // refinement gates planning
 	}
 	var outs []out
 	for _, w := range list {
 		outs = append(outs, out{w.Name, w.Profile, w.TmuxSession, w.Repos,
 			fmt.Sprintf("github.com/orgs/%s/projects/%d", w.Source.Owner, w.Source.Project),
-			map[string]string{"ready": w.Source.Ready, "scheduled": w.Source.Scheduled, "in_progress": w.Source.InProgress}, w.WIP})
+			map[string]string{"ready": w.Source.Ready, "scheduled": w.Source.Scheduled, "in_progress": w.Source.InProgress,
+				"refinement": w.Refine.Status}, w.WIP, w.Session.Autonomy, w.Refine.Enabled})
 	}
 	if o.flags["--json"] {
 		return writeJSON(outs)

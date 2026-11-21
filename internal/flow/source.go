@@ -251,16 +251,12 @@ func (p *project) HasStatus(status string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if ids.Options[status] != "" {
-		return true, nil
-	}
-	// The cache may predate the option: look again once.
-	p.db.Exec(`DELETE FROM gh_ids WHERE workspace = ?`, p.w.Name)
-	if ids, err = p.ids(); err != nil {
-		return false, err
-	}
 	return ids.Options[status] != "", nil
 }
+
+// forgetIDs drops the cached board ids, so the next use reads them again:
+// for an option added to the board since they were cached.
+func (p *project) forgetIDs() { p.db.Exec(`DELETE FROM gh_ids WHERE workspace = ?`, p.w.Name) }
 
 // Create opens a ticket and puts it on the board too: a board whose
 // automation adds sub-issues already has it, and adding it again is a no-op.
