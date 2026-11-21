@@ -46,7 +46,7 @@ type Record struct {
 	// --headless); what the harness prints goes to Log.
 	Headless bool   `json:"headless,omitempty"`
 	Log      string `json:"log,omitempty"`
-	Notes             []Note `json:"notifications,omitempty"`
+	Notes    []Note `json:"notifications,omitempty"`
 
 	Extra map[string]json.RawMessage `json:"-"`
 }
