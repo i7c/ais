@@ -581,9 +581,15 @@ These came up while building, and changed the design above:
   look changed. My answers go in the body's block, so they still count.
 - **Only an L1 outcome counts as a refinement round.** An L2/L3 assessment
   writes the block but doesn't add to "round n of 3".
-- **Refine runs count toward the rate limits** (`per_hour`, `per_day`), like
-  any start: they spend the same subscription. They count toward the global
-  `wip`, not the workspace's, and have their own `refine.wip` (1).
+- **Refine runs have rate limits of their own** (`refine_per_hour` 6,
+  `refine_per_day` 24), *changed 2026-11-21*. At first they counted toward
+  `per_hour` and `per_day` like any start, but then one sweep could use up
+  the hour's work starts. They count toward the global `wip` (which also
+  counts open planners now), not the workspace's, and have their own
+  `refine.wip` (1).
+- **Refine runs are headless** (*2026-11-21*): the dispatcher starts them as
+  detached `ais run --headless` processes, not in a tmux window. `ais runs`,
+  `ais log` and `ais stats` are where you see them.
 - **A refine run's tickets don't block a planner** from opening. They are
   simply not plannable until they are assessed.
 - **The refinement status is optional per board.** If the board has no option

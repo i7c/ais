@@ -317,6 +317,9 @@ the last 5 minutes.
    proposal is `done`, or the ticket is closed), take the highest priority,
    then the oldest.
 4. **Start.**
+   - A refinement run (added later, docs/autonomy-proposal.md) is started as
+     a detached `ais flow start <id>` instead, with no window; the rest of
+     this step is for work sessions.
    - Open a window in the workspace's tmux session (the session is created if
      missing). The window is a login shell, so it stays after the agent exits,
      as tsm's create flow does.

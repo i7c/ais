@@ -65,7 +65,16 @@ ais -d "port the parser" -- pi --thinking high           # short form of the lin
 ```
 
 ais must run inside a tmux pane. It records the session, runs the harness in
-the foreground, and records the exit code when it ends.
+the foreground, and records the exit code when it ends. The one exception is
+a headless run, for work nobody watches:
+
+```
+ais run claude --headless -d "nightly check" --prompt-file check.md
+```
+
+It needs no pane and no terminal. The prompt runs to its end (`--batch`), and
+whatever the harness prints goes to `~/.ais/logs/<id>.log`. `ais flow` starts
+its refinement runs this way.
 
 | option | effect |
 |---|---|
@@ -75,6 +84,8 @@ the foreground, and records the exit code when it ends.
 | `--from auto\|origin\|local\|head`, `--[no-]detach` | how the worktree's branch starts (see Worktrees) |
 | `--repos A,B,...` | a worktree of each repo, side by side; the session starts in the directory that holds them |
 | `--prompt TEXT`, `--prompt-file PATH` | first message for the harness (`-` reads stdin); the session stays interactive |
+| `--batch` | run the prompt to its end and exit, no conversation (the profile's `batch` template, `-p` for claude and pi) |
+| `--headless` | `--batch` with no tmux pane or terminal; output to `~/.ais/logs/<id>.log` |
 | `--cwd DIR` | start in DIR |
 | `--fork ID` | a second session beside ID: same profile, directory and worktree, conversation forked |
 | `-n, --dry-run` | print the command and environment, run nothing |
@@ -120,13 +131,16 @@ name for `[profile.<name>]` and is still read.
 |---|---|
 | `ls [-a]` | active sessions (`-a`: ended ones too), with the age of their last notification |
 | `status [-a]` | `ls` plus the recent notifications |
+| `runs [--since 3h\|7d] [--kind K] [--active] [-n N\|-a] [--json]` | every run, ongoing and past, newest first, including pruned ones: kind (`interactive`, `planner`, `flow`, `headless`), status, start, duration, exit code |
+| `log ID [--full] [-f] [--path]` | what a run said: a headless run's log, or the claude conversation transcript (`--full`, and the default for any run that is not headless); `-f` follows it until the run ends |
+| `stats [--json]` | runs started in the last 1h, 24h, 7d and 30d by kind, what is running now, failures, session hours |
 | `select [ID]` | switch the tmux client to a session's pane; without ID, pick from a list (fzf if installed) |
 | `current` | the session this shell runs in |
 | `notify TEXT` | send a desktop notification and record it on the session |
 | `name [--set N] [--of TEXT]` | the session's name, used for its worktree directory and branch |
 | `restart [ID]` | run an ended session again in this pane, resuming its conversation; `--fresh` starts a new one |
 | `wt add\|ls\|path\|prune` | the current session's worktrees |
-| `prune [--all] [--days N] [--keep-worktrees]` | remove ended sessions (default: older than 7 days) and their clean worktrees |
+| `prune [--all] [--days N] [--keep-worktrees]` | remove ended sessions (default: older than 7 days) and their clean worktrees; the records move to `~/.ais/history.jsonl` for `runs` and `stats` |
 | `state [--active] [--since ID]` | all profiles and sessions as JSON |
 | `env ID [--json]` | the directory and environment of a session, for a shell beside it |
 | `install`, `instructions` | see Build and install |
@@ -216,7 +230,8 @@ know. Each session lists what can be done with it (`can_restart`,
 
 0. **Refinement.** Every five minutes (at most every `refine.sweep`), each
    ticket that turned plannable is refined by a headless run before any
-   planner sees it. A ticket that says enough to plan from (L2/L3) stays
+   planner sees it. The run happens in the background, in no tmux window:
+   `ais runs --kind headless` lists them, `ais log ID` shows what one said. A ticket that says enough to plan from (L2/L3) stays
    `ready`. One that doesn't (L1) gets the evidence found and its questions
    written into a block at the end of its body, and moves to `refinement`.
    You answer in the block and move it back to `ready`, and it is refined
@@ -251,9 +266,11 @@ Nothing runs between timer ticks. State is kept in `~/.ais/flow.db`
 
 ```toml
 [flow]                   # limits across all workspaces
-wip = 4                  # sessions started by flow and not yet done
-per_hour = 4             # starts in any 60 minutes
-per_day = 16             # starts in any 24 hours
+wip = 4                  # flow sessions live at once: work, refinement runs, open planners
+per_hour = 4             # work session starts in any 60 minutes
+per_day = 16             # work session starts in any 24 hours
+refine_per_hour = 6      # refinement run starts in any 60 minutes
+refine_per_day = 24      # refinement run starts in any 24 hours
 
 [workspace.soi]
 tmux_session = "soi"
@@ -318,7 +335,7 @@ tree and what in it is plannable.
 
 The timer starts a planner only when all of these hold:
 - something is plannable;
-- running plus queued sessions are below `wip`;
+- running and queued work sessions plus open planners are below `wip`;
 - no planner is open;
 - `min_interval` has passed since the last planner started.
 
@@ -361,6 +378,8 @@ The design and the decisions behind it are in
 |---|---|
 | `~/.ais/config.toml` | profiles, `[worktree]`, `[tmux]`, `[notify]`, `[flow]`, workspaces |
 | `~/.ais/sessions.json` | recorded sessions |
+| `~/.ais/history.jsonl` | sessions `prune` removed, one per line, for `runs` and `stats` |
+| `~/.ais/logs/` | headless runs' output (`<id>.log`), and flow's own notes on each background start (`flow-<proposal>.log`) |
 | `~/.ais/flow.db` | flow's planners, queue, assessments, start log and events |
 | `~/.config/systemd/user/ais-flow-*` | flow's timers, written by `ais flow install` |
 

@@ -42,8 +42,9 @@ Planned and dispatched sessions: see docs/flow-proposal.md.
                                ready
   limit                        the limits in force, and where each comes from
   limit KEY VALUE [--until eod|HH:MM|YYYY-MM-DD | --for 3h]
-                               raise or lower wip, per_hour or per_day for a
-                               while (default: until the end of the day)
+                               raise or lower wip, per_hour, per_day,
+                               refine_per_hour or refine_per_day for a while
+                               (default: until the end of the day)
   limit --clear [KEY]          drop overrides
   dispatch [--dry-run]         start queued sessions while the limits allow
                                (what the timer runs every five minutes)
