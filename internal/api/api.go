@@ -84,7 +84,11 @@ type Session struct {
 	// FlowProposal is the "ais flow" proposal the session was started for.
 	FlowProposal string `json:"flow_proposal,omitempty"`
 	// FlowPlanner is the "ais flow" planner the session is.
-	FlowPlanner   string         `json:"flow_planner,omitempty"`
+	FlowPlanner string `json:"flow_planner,omitempty"`
+	// Headless sessions have no tmux pane (Tmux is empty) and no terminal;
+	// what the harness printed is in Log ("ais log ID").
+	Headless      bool           `json:"headless,omitempty"`
+	Log           string         `json:"log,omitempty"`
 	Notifications []Notification `json:"notifications"`
 }
 

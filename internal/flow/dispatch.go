@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/i7c/ais/internal/ais"
@@ -115,26 +116,41 @@ func (d *dispatcher) next() (*Proposal, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	all, err := countFor(d.db, "")
+	running, err := live(d.db)
 	if err != nil {
 		return nil, "", err
 	}
-	if all.Running >= limits.WIP {
-		return nil, fmt.Sprintf("%d of %d sessions running (wip)", all.Running, limits.WIP), nil
+	if running >= limits.WIP {
+		return nil, fmt.Sprintf("%d of %d flow sessions live, planners included (wip)", running, limits.WIP), nil
 	}
-	hour, err := startsSince(d.db, now().Add(-time.Hour))
-	if err != nil {
-		return nil, "", err
-	}
-	if hour >= limits.PerHour {
-		return nil, fmt.Sprintf("%d started in the last hour (per_hour %d)", hour, limits.PerHour), nil
-	}
-	day, err := startsSince(d.db, now().Add(-24*time.Hour))
-	if err != nil {
-		return nil, "", err
-	}
-	if day >= limits.PerDay {
-		return nil, fmt.Sprintf("%d started in the last 24h (per_day %d)", day, limits.PerDay), nil
+	// Work sessions and refinement runs each have a rate of their own, so a
+	// sweep that queues many refinements cannot hold back the work.
+	rateFull := map[string]string{}
+	for _, r := range []struct {
+		kind, key string
+		span      time.Duration
+		limit     int
+		window    string
+	}{
+		{"work", "per_hour", time.Hour, limits.PerHour, "hour"},
+		{"work", "per_day", 24 * time.Hour, limits.PerDay, "24h"},
+		{"refine", "refine_per_hour", time.Hour, limits.RefinePerHour, "hour"},
+		{"refine", "refine_per_day", 24 * time.Hour, limits.RefinePerDay, "24h"},
+	} {
+		if rateFull[r.kind] != "" {
+			continue
+		}
+		n, err := startsSince(d.db, now().Add(-r.span), r.kind)
+		if err != nil {
+			return nil, "", err
+		}
+		if n >= r.limit {
+			what := "work sessions"
+			if r.kind == "refine" {
+				what = "refinement runs"
+			}
+			rateFull[r.kind] = fmt.Sprintf("%d %s started in the last %s (%s %d)", n, what, r.window, r.key, r.limit)
+		}
 	}
 	queued, err := proposals(d.db, `state = 'queued'`)
 	if err != nil {
@@ -144,7 +160,16 @@ func (d *dispatcher) next() (*Proposal, string, error) {
 		return nil, "the queue is empty", nil
 	}
 	reasons := []string{}
+	said := map[string]bool{}
 	for _, p := range queued {
+		kind := orDefault(p.Kind, "work")
+		if why := rateFull[kind]; why != "" {
+			if !said[kind] {
+				reasons = append(reasons, why)
+				said[kind] = true
+			}
+			continue
+		}
 		w, ok := d.cfg.Workspaces[p.Workspace]
 		if !ok {
 			reasons = append(reasons, p.ID+": workspace "+p.Workspace+" is gone from config")
@@ -257,8 +282,13 @@ func (d *dispatcher) start(p *Proposal, manual bool) error {
 		return err
 	}
 	command := shellJoin([]string{ais.Self(), "flow", "start", p.ID})
+	headless := p.Kind == "refine"
 	if d.dry {
-		fmt.Fprintf(stdout, "would start %s (%s) in tmux session %s: %s\n", p.ID, p.Title, w.TmuxSession, command)
+		if headless {
+			fmt.Fprintf(stdout, "would start %s (%s) in the background: %s\n", p.ID, p.Title, command)
+		} else {
+			fmt.Fprintf(stdout, "would start %s (%s) in tmux session %s: %s\n", p.ID, p.Title, w.TmuxSession, command)
+		}
 		return nil
 	}
 	err := d.db.tx(func(tx *sql.Tx) error {
@@ -273,11 +303,24 @@ func (d *dispatcher) start(p *Proposal, manual bool) error {
 		if _, err := tx.Exec(`INSERT INTO starts (at, proposal_id, manual) VALUES (?, ?, ?)`, stamp(now()), p.ID, manual); err != nil {
 			return err
 		}
-		logEvent(tx, "dispatched", p.ID, map[string]any{"title": p.Title, "manual": manual, "tmux": w.TmuxSession})
+		where := map[string]any{"title": p.Title, "manual": manual, "tmux": w.TmuxSession}
+		if headless {
+			where = map[string]any{"title": p.Title, "manual": manual, "headless": true}
+		}
+		logEvent(tx, "dispatched", p.ID, where)
 		return nil
 	})
 	if err != nil {
 		return err
+	}
+	if headless {
+		if err := spawnDetached(p.ID); err != nil {
+			d.db.Exec(`UPDATE proposals SET state='queued', started_at='' WHERE id=? AND state='starting'`, p.ID)
+			return fmt.Errorf("could not start it in the background: %w", err)
+		}
+		note("started %s (%s) in the background; ais runs, ais log", p.ID, p.Title)
+		fmt.Fprintln(stdout, p.ID)
+		return nil
 	}
 	pane, err := openPane(w.TmuxSession, home())
 	if err == nil {
@@ -290,6 +333,38 @@ func (d *dispatcher) start(p *Proposal, manual bool) error {
 	note("started %s (%s) in %s", p.ID, p.Title, w.TmuxSession+":"+pane)
 	fmt.Fprintln(stdout, p.ID)
 	return nil
+}
+
+// spawnDetached runs "ais flow start <id>" in the background: its own
+// session, no terminal and no pane, so it survives the dispatcher and shows
+// up nowhere on screen. TMUX stays: it names the server, which a planner the
+// run opens when it ends must use; only the pane it would claim goes. What flow itself says about the run goes to
+// logs/flow-<id>.log; what the harness says, to the session's own log.
+func spawnDetached(id string) error {
+	path := filepath.Join(homeDir(), "logs", "flow-"+id+".log")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	out, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	cmd := exec.Command(ais.Self(), "flow", "start", id)
+	cmd.Dir = home()
+	cmd.Stdout, cmd.Stderr = out, out
+	var env []string
+	for _, kv := range os.Environ() {
+		if k, _, _ := strings.Cut(kv, "="); k != "TMUX_PANE" {
+			env = append(env, kv)
+		}
+	}
+	cmd.Env = env
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	return cmd.Process.Release()
 }
 
 // checkTrust refuses to start claude where its folder-trust dialog would

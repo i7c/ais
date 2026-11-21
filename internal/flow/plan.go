@@ -229,8 +229,12 @@ func noRoom(db *DB, cfg *Config, w *Workspace) (bool, string, error) {
 	if err != nil {
 		return false, "", err
 	}
-	if all.Running+all.Queued >= limits.WIP {
-		return true, fmt.Sprintf("%d running and %d queued already fill wip %d", all.Running, all.Queued, limits.WIP), nil
+	planners, err := openPlanners(db)
+	if err != nil {
+		return false, "", err
+	}
+	if all.Running+all.Queued+planners >= limits.WIP {
+		return true, fmt.Sprintf("%d running, %d queued and %d open planner(s) already fill wip %d", all.Running, all.Queued, planners, limits.WIP), nil
 	}
 	if w.WIP > 0 {
 		c, err := countFor(db, w.Name, "work")

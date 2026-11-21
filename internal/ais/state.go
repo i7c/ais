@@ -77,6 +77,8 @@ func publicSession(r *Record, cfg config, host string) api.Session {
 		LastInputAt:   r.LastInputAt,
 		FlowProposal:  r.FlowProposal,
 		FlowPlanner:   r.FlowPlanner,
+		Headless:      r.Headless,
+		Log:           r.Log,
 		Notifications: notes,
 	}
 }

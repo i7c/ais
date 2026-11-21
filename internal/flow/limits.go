@@ -18,7 +18,7 @@ type effective struct {
 	Until  string // non-empty while an override holds
 }
 
-var limitKeys = []string{"wip", "per_hour", "per_day"}
+var limitKeys = []string{"wip", "per_hour", "per_day", "refine_per_hour", "refine_per_day"}
 
 func configured(l Limits, key string) int {
 	switch key {
@@ -26,6 +26,10 @@ func configured(l Limits, key string) int {
 		return l.WIP
 	case "per_hour":
 		return l.PerHour
+	case "refine_per_hour":
+		return l.RefinePerHour
+	case "refine_per_day":
+		return l.RefinePerDay
 	}
 	return l.PerDay
 }
@@ -66,6 +70,10 @@ func effectiveLimits(db *DB, l Limits) (Limits, []effective, error) {
 			out.PerHour = e.Value
 		case "per_day":
 			out.PerDay = e.Value
+		case "refine_per_hour":
+			out.RefinePerHour = e.Value
+		case "refine_per_day":
+			out.RefinePerDay = e.Value
 		}
 		list = append(list, e)
 	}

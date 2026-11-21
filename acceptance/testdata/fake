@@ -63,4 +63,5 @@ while [ ! -e "$dir/exit" ]; do
   sleep 0.05
 done
 code=$(cat "$dir/exit")
+echo "fake: exiting ${code:-0}"
 exit "${code:-0}"

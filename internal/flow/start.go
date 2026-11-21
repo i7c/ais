@@ -144,7 +144,7 @@ func startRefine(cfg *Config, w *Workspace, p *Proposal) (int, error) {
 	os.Setenv("AIS_FLOW_WORKSPACE", w.Name)
 	marked, stop := watchStart(cfg, p)
 	cwd := orDefault(w.Refine.Cwd, home())
-	code := ais.Main([]string{"run", p.Profile, "--no-worktree", "--cwd", cwd, "-d", p.Title, "--batch", "--prompt", text})
+	code := ais.Main([]string{"run", p.Profile, "--no-worktree", "--cwd", cwd, "-d", p.Title, "--headless", "--prompt", text})
 	settleWatch(marked, stop)
 	finishRefine(cfg, w, p, code)
 	return code, nil

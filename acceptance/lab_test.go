@@ -484,6 +484,8 @@ type Session struct {
 	LastInputAt  *string           `json:"last_input_at"`
 	FlowProposal string            `json:"flow_proposal"`
 	FlowPlanner  string            `json:"flow_planner"`
+	Headless     bool              `json:"headless"`
+	Log          string            `json:"log"`
 	Notes        []Notification    `json:"notifications"`
 }
 

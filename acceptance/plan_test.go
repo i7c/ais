@@ -101,8 +101,9 @@ func TestFlowPlanLifecycle(t *testing.T) {
 		t.Fatalf("no fresh planner for the tickets left ready (got %q)", next)
 	}
 	l.waitPlanner(next)
-	if ls := l.MustFlow("ls").Stdout; !strings.Contains(ls, next+" since") {
-		t.Errorf("ls does not show the open planner:\n%s", ls)
+	// running counts the session it queued, and the planner itself.
+	if ls := l.MustFlow("ls").Stdout; !strings.Contains(ls, next+" since") || !strings.Contains(ls, "running 2/4") {
+		t.Errorf("ls does not show the open planner, counted toward wip:\n%s", ls)
 	}
 }
 

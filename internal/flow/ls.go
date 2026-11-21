@@ -20,6 +20,7 @@ type counts struct {
 // countFor counts a workspace's proposals ("": all of them) of one kind
 // ("": every kind). Refinement runs count toward the global wip, but not a
 // workspace's (they have refine.wip), nor toward room for a planner.
+// Planners are not proposals; live adds them for the global wip.
 func countFor(db *DB, ws string, kind ...string) (counts, error) {
 	var c counts
 	q := `SELECT COUNT(*) FROM proposals WHERE state = ?`
@@ -59,11 +60,32 @@ func countFor(db *DB, ws string, kind ...string) (counts, error) {
 	return c, nil
 }
 
-// startsSince counts the starts (automatic and manual alike) since t.
-func startsSince(db *DB, t time.Time) (int, error) {
+// startsSince counts the starts (automatic and manual alike) since t of one
+// kind of proposal: work and refinement runs each have their own rate.
+func startsSince(db *DB, t time.Time, kind string) (int, error) {
 	var n int
-	err := db.QueryRow(`SELECT COUNT(*) FROM starts WHERE at > ?`, stamp(t)).Scan(&n)
+	err := db.QueryRow(`SELECT COUNT(*) FROM starts s LEFT JOIN proposals p ON p.id = s.proposal_id
+		WHERE s.at > ? AND COALESCE(p.kind, 'work') = ?`, stamp(t), kind).Scan(&n)
 	return n, err
+}
+
+// openPlanners counts the planner sessions open now, in every workspace:
+// they are sessions too, and count toward the global wip.
+func openPlanners(db *DB) (int, error) {
+	var n int
+	err := db.QueryRow(`SELECT COUNT(*) FROM planners WHERE state = 'open'`).Scan(&n)
+	return n, err
+}
+
+// live is everything flow has going now, for the global wip: work sessions,
+// refinement runs and open planners.
+func live(db *DB) (int, error) {
+	all, err := countFor(db, "")
+	if err != nil {
+		return 0, err
+	}
+	planners, err := openPlanners(db)
+	return all.Running + planners, err
 }
 
 func cmdLs(args []string) error {
@@ -112,20 +134,23 @@ func cmdLs(args []string) error {
 	if err := tw.Flush(); err != nil {
 		return err
 	}
-	all, err := countFor(db, "")
+	running, err := live(db)
 	if err != nil {
 		return err
 	}
-	hour, err := startsSince(db, now().Add(-time.Hour))
-	if err != nil {
-		return err
+	var used [4]int
+	for i, q := range []struct {
+		span time.Duration
+		kind string
+	}{{time.Hour, "work"}, {24 * time.Hour, "work"}, {time.Hour, "refine"}, {24 * time.Hour, "refine"}} {
+		if used[i], err = startsSince(db, now().Add(-q.span), q.kind); err != nil {
+			return err
+		}
 	}
-	day, err := startsSince(db, now().Add(-24*time.Hour))
-	if err != nil {
-		return err
-	}
-	fmt.Fprintf(stdout, "\nrunning %d/%d   started in the last hour %d/%d, last 24h %d/%d\n",
-		all.Running, limits.WIP, hour, limits.PerHour, day, limits.PerDay)
+	fmt.Fprintf(stdout, "\nrunning %d/%d (work sessions, refinement runs and planners)\n"+
+		"work started in the last hour %d/%d, last 24h %d/%d\n"+
+		"refinement started in the last hour %d/%d, last 24h %d/%d\n",
+		running, limits.WIP, used[0], limits.PerHour, used[1], limits.PerDay, used[2], limits.RefinePerHour, used[3], limits.RefinePerDay)
 	if err := listRunning(db); err != nil {
 		return err
 	}

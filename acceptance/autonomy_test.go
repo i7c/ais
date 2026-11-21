@@ -167,9 +167,19 @@ func TestFlowRefinement(t *testing.T) {
 	if ts := l.Ready(); len(find(ts, url).Work) != 0 {
 		t.Errorf("an unassessed ticket is plannable: %+v", find(ts, url))
 	}
+	// Work sessions' rate does not hold refinement back.
+	l.MustFlow("limit", "per_hour", "0", "--for", "1h")
 	l.MustFlow("dispatch")
 	run := l.refineRun(url)
 	sid := l.waitRunning(run.ID)
+	// Headless: in the background, in no tmux window, its output in a log.
+	if s := l.Session(sid); !s.Headless || s.Tmux.PaneID != "" || s.Log == "" {
+		t.Errorf("refine session = %+v", s)
+	}
+	if _, err := l.tmux("has-session", "-t", "=soi"); err == nil {
+		t.Errorf("a refinement run opened the workspace's tmux session")
+	}
+	l.MustFlow("limit", "--clear")
 	f := l.Fake(sid)
 	if i := indexOf(f.Argv, "--"); i < 1 || f.Argv[i-1] != "-p" || !strings.HasPrefix(f.Prompt(), "# Refine a ticket before it is planned") ||
 		!strings.Contains(f.Prompt(), "Your ticket: **"+url+"**") {
@@ -278,6 +288,17 @@ func TestFlowRefinementFailedRun(t *testing.T) {
 	l := refineLab(t, 3)
 	url := ghURL("gpwsoi/backend", 12)
 	l.Close(ghURL("gpwsoi/backend", 13), ghURL("gpwsoi/iac", 4))
+	// Refinement has its own rate: at 0, nothing starts, and dispatch says why.
+	l.MustFlow("limit", "refine_per_hour", "0", "--for", "1h")
+	if r := l.MustFlow("dispatch"); !strings.Contains(r.Stderr, "refine_per_hour") {
+		t.Errorf("dispatch at refine_per_hour 0:\n%s", r)
+	}
+	for _, p := range l.Proposals() {
+		if p.Kind == "refine" && p.State != "queued" {
+			t.Errorf("a refinement run started past refine_per_hour: %+v", p)
+		}
+	}
+	l.MustFlow("limit", "--clear")
 	l.MustFlow("dispatch")
 	run := l.refineRun(url)
 	sid := l.waitRunning(run.ID)
@@ -291,6 +312,9 @@ func TestFlowRefinementFailedRun(t *testing.T) {
 	}
 	if log := l.MustFlow("log").Stdout; !strings.Contains(log, "refine-failed") {
 		t.Errorf("log:\n%s", log)
+	}
+	if out := l.MustAis(nil, "log", sid).Stdout; !strings.Contains(out, "fake: exiting 1") {
+		t.Errorf("ais log of the run:\n%s", out)
 	}
 }
 

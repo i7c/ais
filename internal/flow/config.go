@@ -19,12 +19,14 @@ import (
 // Limits caps how much flow starts. Zero means "not configured" only while
 // reading; Defaults fills it in.
 type Limits struct {
-	WIP     int // live dispatched sessions
-	PerHour int // starts in any rolling 60 minutes
-	PerDay  int // starts in any rolling 24 hours
+	WIP           int // live flow sessions: work, refinement runs, open planners
+	PerHour       int // work session starts in any rolling 60 minutes
+	PerDay        int // work session starts in any rolling 24 hours
+	RefinePerHour int // refinement run starts in any rolling 60 minutes
+	RefinePerDay  int // refinement run starts in any rolling 24 hours
 }
 
-var defaultLimits = Limits{WIP: 4, PerHour: 4, PerDay: 16}
+var defaultLimits = Limits{WIP: 4, PerHour: 4, PerDay: 16, RefinePerHour: 6, RefinePerDay: 24}
 
 // Source is where a workspace's tickets come from and how their status is
 // told. Only GitHub Projects (v2) for now.
@@ -150,6 +152,8 @@ func parseConfig(raw map[string]any) (*Config, error) {
 		c.Limits.WIP = r.positive(t, "wip", "flow.wip", defaultLimits.WIP)
 		c.Limits.PerHour = r.positive(t, "per_hour", "flow.per_hour", defaultLimits.PerHour)
 		c.Limits.PerDay = r.positive(t, "per_day", "flow.per_day", defaultLimits.PerDay)
+		c.Limits.RefinePerHour = r.positive(t, "refine_per_hour", "flow.refine_per_hour", defaultLimits.RefinePerHour)
+		c.Limits.RefinePerDay = r.positive(t, "refine_per_day", "flow.refine_per_day", defaultLimits.RefinePerDay)
 	}
 	for name, v := range r.table(raw, "workspace", "[workspace]") {
 		where := "workspace." + name
