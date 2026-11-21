@@ -348,7 +348,7 @@ review from me, or I run it myself with `--by-hand`. Then it:
 1. copies the final plan into the PR description, under "Plan (approved
    <date>)";
 2. **rewrites the branch without every commit carrying `Ais-Plan`.** Those
-   commits touch only the plan file (`plan open`/`update` guarantee it), so
+   commits touch only the plan file (`review open`/`update` guarantee it), so
    dropping them can't conflict. Then it force-pushes with lease;
 3. marks the PR ready for review;
 4. records phase `approved` on the proposal.
