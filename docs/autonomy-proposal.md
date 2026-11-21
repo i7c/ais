@@ -1,335 +1,482 @@
-# Proposal: autonomy levels for ticket sessions
+# Proposal: autonomy levels, ticket refinement and plan review
 
-Status: **draft for review** (2026-11-21)
+Status: **draft, round 2** (2026-11-21)
 
 ## 1. What this is for
 
 `ais flow` starts sessions on its own now. Inside each one, `work-tickets`
-does what it did when I started it by hand: it surveys, proposes a batch with a
-short preview, and waits for my go. When the session was dispatched at 3 a.m.,
-a preview is the least useful thing to find in the morning. I want the session
-to go **as far as the ticket lets it** before it stops for me.
+still does what it did when I started it by hand: it surveys, proposes a batch
+with a short preview, and waits for my go. I want every session to go **as far
+as the ticket lets it** before it stops for me.
 
-How far that is depends on the ticket. A ticket rarely holds everything an
-agent needs, so a session must judge how much it can decide alone and say why.
+How far that is depends on the ticket, and a ticket rarely holds everything an
+agent needs. So this proposal splits the work in two:
 
-There is one fixed rule at every level: **nothing is changed and no execution
-tokens are spent before I approve a plan.** Autonomy here means how good the
-plan is when I first see it. It does not mean doing the work unasked.
+- **Refinement** makes the ticket good enough to plan from. It is about intent,
+  prerequisites and requirements, not about how to build. It runs without me,
+  writes what it found into the ticket, and hands the rest back to me as
+  questions.
+- **Work sessions** only get tickets that are good enough. They produce a plan
+  as good as the ticket allows (L2 or L3), and I review it as a draft PR.
 
-This proposal answers two questions:
+One rule holds everywhere: **nothing is changed and no execution tokens are
+spent before I approve a plan.** Refinement writes only to the ticket.
 
-1. How a session knows which level to work at (§3–§5).
-2. How I review and approve a plan somewhere better than a terminal (§6–§7).
+## 2. Settled so far
 
-## 2. The three levels
+| Question | Decision |
+|---|---|
+| Levels | L1 means the ticket needs refinement, and it never reaches a work session. L2 means a plan with its open questions, refined with me. L3 means a plan the session refined itself. |
+| Level = ? | `min(ceiling, evidence)`. I set the ceiling and the ticket provides the evidence (§4). Default ceiling L2. |
+| L1 handling | A separate, non-interactive refinement run writes evidence and questions into the ticket and moves it to `refinement`. I answer, then move it back to `ready` (§5). |
+| Who starts refinement | flow's deterministic tick, not the planner (§5.1). |
+| Loops | A round counter lives in the ticket, with a soft limit (default 3). Past it, the ticket goes to the planner flagged instead of back to refinement (§5.4). |
+| WIP | A refinement run counts as a dispatched session. Its slot frees itself when the run exits. |
+| Task layer | Agents never call `gh` for tickets. Everything goes through `ais flow ticket …`, backed by the workspace's source (§6). |
+| Review surface | A draft plan PR (§8). Tooling, not instructions, removes the plan commits (§8.2). |
+| Harnesses | Every profile that has a non-interactive template can run refinement. That is claude and pi built in (§7). |
+| Planner-side questions, review nudge | Not in v1. |
+| Risk (R7) | Caps the level at L2; it does not force L1. |
 
-| Level | The session hands me | I do | It stops when |
-|---|---|---|---|
-| **L1 — Questions** | What it understood, and the questions it needs answered before it can propose anything. That may be 3 questions or 30, grouped and each with a default where one exists. | Answer. | The questions are posted. After my answers it re-assesses, usually to L2. |
-| **L2 — Proposal** | A plan with the full set of sections (§4) and its open questions. | Refine it with the session: ask for research or evidence, change it, approve it. | The plan is posted. |
-| **L3 — Refined proposal** | The same plan, after the session has researched, critiqued and revised it itself (§5). It also lists the standards it found missing and proposes how to add them. | Read and approve, or send it back. | It passes its own review, or it gives up and drops to L2. |
+## 3. The lifecycle of a ticket
 
-L1 is not a failure. A broken plan built on guesses costs me more than a good
-list of questions.
+```
+            I mark it ready
+                  │
+                  ▼
+   ┌────────── ready ◄──────────────────────────────┐
+   │              │ not assessed for this version   │
+   │              ▼                                 │
+   │      refine run (headless, holds the ticket)   │
+   │        │ L2/L3                   │ L1          │
+   │        ▼                         ▼             │
+   │   assessed, stays ready     refinement ── I answer, move it to ready
+   │        │                         (round n+1)
+   │        ▼
+   └──► planner proposes ─► scheduled ─► In Progress
+                                          │ plan PR (L2/L3)
+                                          │ I approve
+                                          ▼
+                                      implementation ─► Done
+```
 
-## 3. Choosing the level: a ceiling from me, evidence from the ticket
+The board gets one new status, `refinement`. Nothing else changes in the
+status contract, and the planner never sees a ticket that hasn't been assessed.
 
-Two inputs decide the level:
+## 4. Choosing the level
 
-- **The ceiling.** This is the highest level I allow. I set it, or I accept the
-  planner's suggestion (§3.2). It defaults to L2.
-- **The evidence.** This is the level the ticket actually supports, from a
-  readiness check the session runs on its context (§3.1).
+### 4.1 The readiness check
 
-**The session works at `min(ceiling, evidence)`.** It may always go lower than
-the ceiling, but never higher, and it says why in the first line of what it
-posts:
-
-> Working at **L1** (ceiling L3): the ticket has no checkable "Done when", and
-> two ancestors disagree about whether the old API stays.
-
-This keeps experiments cheap: I can raise the ceiling on a whole workspace and
-still trust that an under-specified ticket comes back as questions.
-
-### 3.1 The readiness check
-
-The session scores its context, which is the ticket and everything
+Refinement runs this check, and so does a work session if the ticket changed
+since it was last assessed. It runs on the ticket and on everything
 `work-tickets` already reads up the chain: ancestors, blockers' hand-offs, the
 plan, and the repo's `AGENTS.md`/`CLAUDE.md`. Each criterion is answered with
-the evidence it rests on, not with a vague impression.
+the evidence it rests on.
 
 | # | Criterion | Met when | If not met |
 |---|---|---|---|
 | R1 | **Intent** | The ticket or an ancestor says why the work matters and what outcome it serves. | L1 |
-| R2 | **Done when** | There are checkable acceptance criteria. "Works well" does not count. | L1 |
+| R2 | **Done when** | There are checkable acceptance criteria. | L1 |
 | R3 | **Scope** | "Out of scope" is stated, or the boundary is obvious from the ancestors. | L1 if the work could reasonably go two very different sizes, else L2 |
-| R4 | **Decisions** | Every fork in the approach is either decided upstream or has a stated default ("Decide while working"). | L1 if a fork changes what gets built; L2 if it only changes how |
-| R5 | **Verification** | A way to check the work exists or is named: tests, a command, a metric, an acceptance suite. | L2 at most |
-| R6 | **Conventions** | The repo states its rules: `AGENTS.md`, linters, test layout, commit style. | L2 at most |
-| R7 | **Risk** | Nothing irreversible or outward-facing that the ticket leaves open: prod data, deletes, cost, public APIs, security. | L2 at most, whatever else is met |
+| R4 | **Decisions** | Every fork is decided upstream or has a stated default. | L1 if it changes *what* is built; L2 if only *how* |
+| R5 | **Verification** | A way to check the result exists or is named: tests, a command, a metric, a reviewer. | L2 at most |
+| R6 | **Conventions** | The rules for this kind of work are written down: `AGENTS.md`, linters, a research template, a style. | L2 at most |
+| R7 | **Risk** | Nothing irreversible or outward-facing is left open. | L2 at most |
 
-The evidence level is:
+The evidence level is **L1** if R1, R2 or a "what" R4 fails, **L3** if every
+criterion passes, and **L2** otherwise.
 
-- **L1** if R1, R2 or a "changes what gets built" R4 fails;
-- **L3** if everything passes;
-- **L2** otherwise.
+The criteria are written for any kind of work. For a research or ordering
+ticket, R5 is "how will we know the answer is right" and R6 is "which template
+or standard applies".
 
-R5–R7 cap the level at L2 rather than forcing L1. Missing tests or rules make
-a plan less certain, but they don't make one impossible.
+The rubric lives once, in `~/.agents/shared/autonomy.md`. It is cited by
+`refine-ticket`, `work-tickets` and `plan-sessions`.
 
-The rubric lives in one place: a reference file shared by `work-tickets` and
-`plan-sessions`. Both use the same words for the same gaps.
-
-### 3.2 Where the ceiling comes from
+### 4.2 The ceiling
 
 First match wins:
 
-1. **The session's prompt.** `ais flow queue add --autonomy L3` stores it on the
-   proposal. The session template gets an `{autonomy}` placeholder:
-   `/work-tickets {tickets} --autonomy {autonomy}`. By hand: `/work-tickets #42
-   --autonomy L3`.
-2. **The ticket.** An `Autonomy` single-select field on the project (`L1`/`L2`/
-   `L3`), so I can set it on the board while I triage. A label `autonomy:L3`
-   is the fallback for search sources.
+1. **The session's prompt.** `ais flow queue add --autonomy L3` stores it on
+   the proposal, and the template gets `{autonomy}`. By hand:
+   `/work-tickets #42 --autonomy L3`.
+2. **The ticket.** An `Autonomy` field on the board, or an `autonomy:L3` label,
+   read through the source.
 3. **The workspace.** `[workspace.<ws>.session] autonomy = "L2"`.
 4. **Default:** L2.
 
-**The planner suggests a ceiling.** `plan-sessions` reads every ticket in
-full anyway, so it can run the same readiness check. Its table gains a column:
+The planner doesn't score tickets any more: the assessment is already stored.
+`ais flow ready --json` reports each ticket's level, reasons and round, and the
+planner's table shows them. When I accept a proposal I accept its level, or I
+change it.
 
-| # | title | tickets | repos | after | readiness | suggested level | why this grouping |
-|---|---|---|---|---|---|---|---|
-| 1 | Retry webhooks | #41 | backend | — | R1–R7 ✓ | L3 | … |
-| 2 | Export v2 | #44 | backend, frontend | 1 | R2 ✗, R5 ✗ | L1 | … |
+## 5. Refinement
 
-When I accept a proposal I accept its level too, or change it ("2 at L2"). This
-needs no new habit from me, because I already read that table.
+### 5.1 What starts it
 
-**Optional: asking questions before queuing.** If the planner finds an L1
-ticket, it could post the questions on the ticket instead of proposing a
-session. The ticket then stays `ready`, and a session starts once the answers
-are there. That saves a session slot, but it puts work into the planner that
-it doesn't do today. I'd leave it out of the first version (§9, Q4).
+The dispatch tick (every 5 minutes) gets one new step before it picks work: a
+**refinement sweep**, at most every `refine.sweep` (default 30 min) per
+workspace.
 
-## 4. The plan document
+1. Take every ticket in a ready ticket's `work` (`readyWork`, as the planner
+   does). This covers "the ticket is ready" and "its epic is ready" alike.
+2. Skip tickets that are held, or that already have an assessment for their
+   current version. The **version** is a hash of the title, the body and the
+   comment count, from the source.
+3. Queue a **refine proposal** for each one left: `kind = refine`, one ticket,
+   no human acceptance, priority above work proposals. It holds the ticket
+   (`held_by`) like any proposal, so the planner skips it while it runs.
 
-L2 and L3 produce the same document, and L1 produces its first two sections.
-It has a fixed shape so I learn where to look:
+From there the normal dispatcher starts it, within WIP and the rate limits.
+
+Why not the planner: the planner is interactive and waits for me, while
+refinement must not. The planner also runs twice a day, which is too slow for
+"I marked it ready, tell me what's missing". And starting runs is the
+dispatcher's job; a planner that also launched agents would be a second
+dispatcher.
+
+**When a refine run makes a ticket plannable,** its exit counts as a finished
+session. flow already opens a planner after a finished session
+(`planAfterDone`), so an assessed L2/L3 ticket reaches me without waiting for
+14:00.
+
+### 5.2 What a refine run does — skill `refine-ticket`
+
+It runs headless (§7), in the workspace's planner cwd, with read access to the
+workspace's repos and no worktree, because it changes no code.
+
+1. `ais flow ticket show <ref> --context --json` returns the ticket, its
+   ancestors, blockers, hand-offs, the refinement block (§5.3) with my
+   answers, and the repo paths.
+2. **Gather evidence** for anything evidence can settle:
+   - the code (`code-locator`, `Explore`);
+   - the web (`web-research`, archived);
+   - linked docs, ADRs and earlier tickets.
+
+   Each finding is written as a fact plus where it came from.
+3. **Fold in my answers.** Answered questions become *Decisions* in the block.
+   They are never asked again (§5.4).
+4. **Run the readiness check** (§4.1).
+5. Write the outcome with **one** command, which also sets the status:
+   - **L2/L3:** `ais flow ticket assess <ref> --level L3 --file -`. This updates
+     the block (evidence, decisions, level and reasons), leaves the ticket
+     `ready`, and records the assessment for this version.
+   - **L1:** `ais flow ticket refine <ref> --file -`. This updates the block
+     with the open questions, moves the ticket to `refinement`, and comments
+     "round n: 4 questions, 2 asks to rewrite a section" so I get notified.
+6. Exit. `ais flow start` sees the harness end, marks the run `done`, and frees
+   the slot. No `ais flow done` is needed, and none is possible from a headless
+   run anyway.
+
+It never touches the plan or how to build, and it never edits text I wrote.
+
+### 5.3 The refinement block in the ticket
+
+flow owns one delimited block at the end of the ticket body. Agents don't edit
+the body with their own tools: they hand flow a structured file, and flow
+renders the block and swaps it in. Everything above it is mine and is never
+rewritten.
 
 ```markdown
-# Plan: <title>   ·  Level L2 (ceiling L3)  ·  <tickets>
+<!-- ais:refinement v1 — written by ais flow; answer inline -->
+## Refinement · round 2 of 3 · L1 (2026-11-21)
 
-## Why this level
-<the readiness check: each criterion, met or not, with its evidence>
+**Why L1:** Done-when missing (R2); export format undecided and changes what
+is built (R4).
 
-## Goal and requirements
-<intent in my words, quoted from where it came from; the Done-when list,
- restated as checks; what is out of scope>
+**Evidence**
+- The v1 export lives in `backend/export/csv.go:40`; it streams rows, no
+  pagination. (code)
+- Two customers asked for XLSX in #31 and #38. (tickets)
 
-## Approach
-<what will change, where, in what order; which repo conventions, tools and
- tests it follows, citing AGENTS.md / existing code by path:line>
+**Decisions** (from earlier rounds)
+- D1 (round 1): exports stay synchronous below 10k rows. — you
 
-## Assumptions
-<numbered; each says what it rests on and what breaks if it is wrong>
+**Questions**
+1. Which formats must v2 support? *Default: CSV + XLSX.*
+   > Answer:
+2. Who must be able to run an export: admins, or every user?
+   > Answer:
 
-## Consequences
-<what changes for users, other code, ops, cost; what becomes harder later;
- what can't be undone>
+**Please rewrite**
+- The "Why" section: it says what, not why. What breaks for users today?
 
-## Verification
-<how each Done-when item will be shown to hold: the command, the test, the
- metric>
-
-## Open questions
-<numbered, each with the default the session will take if I don't answer,
- and how much the answer matters: blocks the plan / changes a step / detail>
-
-## Standards gaps            (L3 always, L2 when found)
-<missing tests, rules or tools that forced an assumption, each with a
- proposed fix: a sub-issue, an AGENTS.md line, a check script>
+**Rounds:** 1 · 2026-11-20 · L1 · 5 questions · 2 · 2026-11-21 · L1 · 2 questions
+<!-- /ais:refinement -->
 ```
 
-L1 posts **Why this level**, then **What I understood**, then **Questions**
-(grouped by topic, with defaults where possible). It also says what each answer
-unlocks.
+I answer after `> Answer:`, or I edit my own sections as asked. Then I move the
+ticket to `ready`. That changes nothing in the text, but the edits I made do
+change its version, so the sweep picks it up again.
 
-**Answers improve the ticket, not just this session.** Once I've answered,
-the session writes the answers into the ticket body (a "Decisions" or "Decide
-while working" section), so the next session or a re-run starts higher. This
-is what makes L3 more common over time without depending on me again and again.
+If I move it back to `ready` without changing anything, the version is the
+same, so the old L1 assessment stands and nothing runs. `ais flow ls` lists the
+ticket as "ready, but still L1 with unanswered questions". If I want a round
+anyway, `ais flow refine <ref>` forces one.
 
-## 5. L3: how the session refines on its own
+The block is plain markdown between two comment markers. Any source that has a
+ticket body can hold it.
 
-At L3 the session drafts the L2 plan, then runs a bounded loop before it posts
-anything:
+### 5.4 Keeping it from looping
 
-1. **Research.** For each assumption or open question that evidence could
-   settle, it sends a subagent:
-   - `code-locator` or `Explore` for "where / how is this done here";
-   - `web-research` for "how is this usually done", archived as usual.
+Three rules keep refinement from going round forever:
 
-   It cites the result in the plan and moves the item from *Assumptions* to
-   *Approach*.
-2. **Critique.** A fresh subagent gets the ticket context and the plan, but not
-   the drafting conversation. It reviews against the rubric and the plan's own
-   Done-when. It looks for:
-   - unstated assumptions;
-   - steps with no verification;
-   - scope creep;
-   - conventions ignored;
-   - irreversible steps.
-3. **Revise,** and repeat 2–3 at most **three rounds**.
-4. **Exit check.** The plan is posted at L3 only if:
-   - the critic raises no blocking finding;
-   - every remaining open question has a default and is marked
-     "detail" or "changes a step", not "blocks the plan".
+1. **Every round must narrow.** A question that was answered becomes a decision
+   and is never asked again. A new question must cite the answer or evidence
+   that raised it. Detail-level questions (how, not what) are not L1 material:
+   they go into the block as notes for the work session.
+2. **The rounds are visible.** The round log stays in the block, and the
+   heading says "round 2 of 3".
+3. **The soft limit.** When a ticket is still L1 after `refine.max_rounds`
+   (default 3), the run does not send it back to `refinement`. It records
+   **L2 with open questions**, flagged `refinement limit`, and leaves it
+   `ready`. The planner shows the flag, so I decide there:
+   - plan it anyway, and the open questions become the plan's;
+   - abandon it;
+   - or run `ais flow refine <ref>` for another round.
 
-   Otherwise it is posted as **L2**, with the unresolved findings listed as
-   open questions. "Dropped from L3: the critic's finding 2 needs your call."
+   The limit stops the automation, not me.
 
-**Standards gaps are the L3 deliverable that compounds.** Whenever research or
-the critic had to assume something a repo rule or test would have told it, the
-gap goes in *Standards gaps* with a concrete fix. I approve those like the rest
-of the plan. Small ones (an `AGENTS.md` line) can ride along in the PR. Larger
-ones (a test harness, a check script) become new sub-issues of the same parent,
-as `work-tickets` already does for found work.
+### 5.5 Config
 
-**Cost.** An L3 plan spends maybe 2–5× the tokens of an L2 plan. That is still
-small next to execution, and it is spent while I'm away instead of while I wait.
-Flow's rate limits still apply only to starts, which is fine for now.
-
-## 6. The approval gate
-
-Today "approval" is a message I type in the session. I keep that, and add a
-recorded state so flow and I can see which sessions are waiting on me:
-
-| Session phase | Set by | Seen as |
-|---|---|---|
-| `assessing` | session start | tsm/`ais flow ls`: working |
-| `questions` (L1) | `ais flow phase questions` | waiting on me, with a link |
-| `plan` (L2/L3) | `ais flow phase plan --level L3 --url …` | waiting on me, with a link |
-| `approved` | the session, when I approve | working |
-| `executing` → `done` | as today | |
-
-`ais flow phase` is one small command that writes the phase and the plan's
-link on the proposal, logs an event, and calls `ais notify`:
-
-```
-soi: "Retry webhooks" plan ready (L3, 2 questions) — <link>
+```toml
+[workspace.soi.refine]
+profile = "claude"          # must have a batch template (§7)
+prompt = "/refine-ticket {ticket}"
+max_rounds = 3
+sweep = "30m"
 ```
 
-`ais flow ls` then shows a **waiting for review** group: phase, level, age,
-link. The skill instructions forbid any edit or execution before the
-`approved` phase. The phase field makes it auditable: the hand-off can say
-"approved 09:14 after 2 rounds".
+## 6. The task layer: `ais flow ticket`
 
-## 7. Reviewing somewhere better than a terminal
+Agents reach tickets only through flow. The commands are named by intent, not
+by GitHub:
 
-What I need from a review surface:
+| Command | What it does |
+|---|---|
+| `ticket show <ref> [--context] [--json]` | The ticket: title, body (without the block), status, level and round, the parsed refinement block. With `--context`: ancestors, sub-issues, blockers with their last hand-off, linked PRs. |
+| `ticket comment <ref> --file -` | Post a comment, such as a hand-off. |
+| `ticket assess <ref> --level L2\|L3 --file -` | Record the assessment and write the block (§5.2). |
+| `ticket refine <ref> --file -` | Write the L1 block and move the ticket to `refinement`. |
+| `ticket close <ref> --done\|--not-planned --comment …` | Close a ticket with its evidence, or abandon it. |
+| `ticket new --parent <ref> --title … --file -` | Create a follow-up sub-issue, with optional `--blocked-by`. |
+| `ticket plan <ref> --url <pr>` | Link the plan PR on the ticket (§8). |
 
-- a rendered document;
-- comments **on a specific line**;
-- reachable from my phone;
-- durable, attached to the ticket;
-- the session can read my comments back without me copy-pasting.
+Status changes stay internal to the commands that imply them: `queue add`,
+`start`, `refine`, `close`. Agents never set a status by name.
 
-The candidates:
+**Sources.** `internal/flow` gets a `Source` interface with these operations.
+`github-project` is the only source today, and it implements the interface
+with `gh`, as `source.go` already does for items and status. Every later
+source (an issue search, Linear, a local inbox) implements the same interface,
+so the skills don't change.
 
-| Option | Rendered | Line comments | Phone | Durable / on the ticket | Back to the session | Cost to build |
-|---|---|---|---|---|---|---|
-| **A. Issue comment** with the plan | ✓ | ✗ (reply quotes it) | ✓ GitHub app | ✓ | `gh issue view --comments` | none |
-| **B. Draft "plan PR"**: `plans/<ticket>.md` on the session branch | ✓ | ✓ native review | ✓ | ✓ linked to the ticket | `gh api …/pulls/<n>/comments`; Approve = the gate | small |
-| **C. Claude artifact / Claude Docs** page | ✓ richest (diagrams, collapsible evidence) | ✓ | ✓ | ✗ lives on claude.ai, not on the ticket | comments reach the session only while it runs, and only for Claude Code | small, Claude only |
-| **D. Local file** in the session dir + `glow`/editor, or a tsm pane | ✓ | ✗ | ✗ | ✗ | trivial | none |
-| **E. Own web UI** served by ais | ✓ | ✓ | needs a tunnel | depends | ✓ | large; §11 of the flow proposal rules out a web UI |
+**Outside a workspace.** `work-tickets` is also used by hand in repos with no
+workspace. There, `ais flow ticket` works out the source from the reference
+itself: an issue URL or `owner/repo#n` is GitHub. Board-only operations (the
+status, the `Autonomy` field) are skipped and the command says so.
 
-**Recommendation: B, with A as the record and D as the offline path.**
+**What stays outside the task layer:** git and PRs. They are the code host,
+not the task source, so `git` and `gh pr` stay usable. The one exception is
+the plan PR's lifecycle, which flow owns (§8).
 
-- **The plan is a draft PR.** The session commits `plans/<ticket>.md` on its
-  own branch and opens a draft PR titled `Plan: <title>` with `Part of <ref>`.
-  - I review in GitHub's PR view: line comments, suggestions, "Request
-    changes" to send it back, **"Approve" to approve**.
-  - The session reads the review with `gh` when I tell it "reviewed" in the
-    terminal. Later, a dispatch-tick check can notice a new review and nudge
-    the session for me (§9, Q3).
-- **After approval** the same PR becomes the implementation PR. The session
-  deletes `plans/<ticket>.md`, so the plan never lands on main. It copies the
-  final plan into the PR description, and the commit history keeps the plan
-  and every revision. For multi-repo sessions, the plan PR lives in the repo
-  the ticket's `Repo:` line names, and it links the other repos' PRs.
-- **The ticket gets a short comment** (option A): level, a one-paragraph
-  summary, the link, and the open-question count. Anyone reading the ticket
-  sees there is a plan waiting, without the full text duplicated.
-- **L1 questions go on the ticket itself** as a comment, not in a PR. There is
-  no branch-worthy content yet, and the answers belong on the ticket (§4).
-  I answer in a reply comment, numbered to match.
+The skills `work-tickets`, `plan-sessions` and `plan-to-tickets` are rewritten
+to use `ais flow ticket` instead of `gh issue`/`gh project`.
+`plan-to-tickets` is the largest change, because it needs `ticket new` with
+sub-issue and blocker links.
 
-Why not C as the default: it is the nicest to read, but it ties the workflow to
-Claude Code and a claude.ai account. pi sessions couldn't use it. The plan
-would also live away from the ticket. It is a good optional extra: a
-`work-tickets` flag that also publishes the plan as an artifact for big plans
-with diagrams.
+## 7. Headless runs on every harness
 
-## 8. Changes this needs
+Profiles gain a second template, next to `prompt`:
 
-**Skills** (shared, in `~/.agents/skills/`, via `agents-maintenance`):
+```toml
+[profile.claude]
+prompt = ["--", "{prompt}"]          # interactive, as today
+batch  = ["-p", "--", "{prompt}"]    # run to the end, then exit
+[profile.pi]
+batch  = ["-p", "--", "{prompt}"]
+```
 
-- `work-tickets/references/autonomy.md`: the levels, the rubric, the plan
-  template, the L3 loop. This is the single source both skills cite.
-- `work-tickets`:
-  - read `--autonomy` from the arguments and the ticket's field;
-  - run the readiness check;
-  - in step 2, produce L1 questions or an L2/L3 plan instead of the batch
-    preview;
-  - write answers back into the ticket;
-  - never move to step 3 before `approved`.
+Both are built in for claude and pi, since both have `-p`/`--print`. A profile
+without `batch` can't be the `refine.profile`, and config loading says so.
+Permissions come from the profile's own flags, as for any session.
 
-  Hand-started sessions keep working as today, because the default is L2 and
-  an L2 plan is a superset of the current preview.
-- `plan-sessions`: add the readiness column and suggested level, and
-  `--autonomy` on `queue add`.
+`ais flow start` runs a refine proposal like any other: a tmux window, an ais
+session record, `ais run … --batch --prompt …`. I can watch it, it shows in
+tsm, and `ais notify` works. The one difference is at the end: **when the
+harness exits, `start` marks the proposal `done` itself.** If the run exits
+without calling `ticket assess` or `ticket refine`, flow records a failed
+round. The ticket stays held for `refine.retry` (1 h) and the event is logged,
+so a broken run can't spin.
 
-**ais flow:**
+Still to verify in a spike:
 
-- `proposals.autonomy` column, `queue add/edit --autonomy`, `{autonomy}` in
-  the session template.
-- `proposals.phase`, `plan_url`, `phase_at`; `ais flow phase`; a
-  "waiting for review" group in `ais flow ls`.
-- Source: read an `Autonomy` field if the board has one (optional, like
-  `Status`).
+- whether `claude -p "/refine-ticket …"` invokes the skill;
+- the same for pi's `-p` with a skill. If either doesn't work, the template
+  says "Use the refine-ticket skill on …" instead;
+- whether subagents work in `-p`.
 
-**Not changed:** the dispatcher, limits, the ticket status contract. Phases are
-inside `In Progress`; they don't touch the board's Status.
+## 8. The plan PR
 
-## 9. Open questions for me
+### 8.1 How it works
 
-1. **The ceiling's default:** L2 (no change in behaviour until I raise it), or
-   L3 for flow-dispatched sessions only? *Default: L2 everywhere; raise per
-   workspace once I've seen a few L3 plans.*
-2. **Review surface:** draft plan PR (B) as recommended, or issue comment only
-   (A) to start with less? *Default: B.*
-3. **Getting my review back to the session:** do I tell the session "reviewed"
-   myself, or should the dispatch tick watch plan PRs and type a nudge into the
-   waiting pane? *Default: by hand first; the nudge is a later step.*
-4. **L1 in the planner:** should the planner post L1 questions on tickets
-   instead of queuing a session for them (§3.2)? *Default: no, not in v1.*
-5. **Rubric thresholds:** is R7 (risk) capping at L2 right, or should risky
-   work force L1? *Default: cap at L2, since the plan is reviewed anyway.*
+At L2/L3, the work session writes its plan (shape in §9) and runs
+`ais flow plan open`. That command:
 
-## 10. Build plan
+1. writes `plans/<ticket-number>.md` in the worktree of the ticket's `Repo:`;
+2. commits it alone, with the trailer `Ais-Plan: <ticket url>`;
+3. pushes, and opens a draft PR titled `Plan: <title>` with `Part of <ref>`;
+4. links the PR on the ticket (`ticket plan`), records phase `plan` on the
+   proposal, and notifies me.
 
-1. **Rubric and template.** Write `references/autonomy.md`. Teach
-   `work-tickets` L1/L2 with the plan as a local file plus a ticket comment
-   (A + D). Usable by hand at once: `/work-tickets #n --autonomy L2`.
-2. **Plan PR.** Add review surface B to `work-tickets`, with Approve as the
-   gate and the cleanup after approval.
-3. **flow plumbing.** `autonomy` and `phase` on proposals, `ais flow phase`,
-   the review group in `ais flow ls`, the readiness column in `plan-sessions`.
-4. **L3.** Add the research/critique loop and standards gaps to `work-tickets`.
-   Try it on two or three soi tickets that pass R1–R7, and compare against
-   L2 runs of similar tickets.
-5. **Later:** the review nudge (Q3), planner-side L1 (Q4), the artifact as an
-   extra surface, and a per-workspace report of how often each level happened
-   and why. The "why" column shows which ticket-writing habits to fix.
+Revisions go through `ais flow plan update`, which makes another plan-only
+commit with the same trailer, so I see the diff between revisions in the PR.
+
+I review in GitHub: line comments, suggestions, "Request changes" to send it
+back. When I'm done, I tell the session "reviewed" and it reads the review.
+
+### 8.2 Approval removes the plan — in tooling
+
+`ais flow plan approve` is the gate. It refuses unless the PR has an approving
+review from me, or I run it myself with `--by-hand`. Then it:
+
+1. copies the final plan into the PR description, under "Plan (approved
+   <date>)";
+2. **rewrites the branch without every commit carrying `Ais-Plan`.** Those
+   commits touch only the plan file (`plan open`/`update` guarantee it), so
+   dropping them can't conflict. Then it force-pushes with lease;
+3. marks the PR ready for review;
+4. records phase `approved` on the proposal.
+
+Implementation commits come after this, on the same branch and the same PR.
+
+**`ais flow plan check`** is the safety net. It fails if, in any of the
+session's worktrees, `base..HEAD` contains a commit with `Ais-Plan`, or the
+tree contains `plans/<n>.md` for one of the session's tickets. It runs:
+
+- in `ais flow done` (which refuses to mark the session done while it fails);
+- as a `pre-push` hook that `ais flow start` installs in the session's
+  worktrees, but only after `approve`. Before approval, pushing plan commits
+  is the point.
+
+`work-tickets` also runs it explicitly in close-out, so a failure shows up
+while I'm still there.
+
+## 9. The plan document
+
+This is what goes into the plan PR at L2 and L3:
+
+```markdown
+# Plan: <title>  ·  L2 (ceiling L3)  ·  <tickets>
+
+## Why this level        — the readiness check, with evidence
+## Goal and requirements — intent, Done-when as checks, out of scope
+## Approach              — what changes, where, in what order; the
+                           conventions and tools it follows (path:line)
+## Assumptions           — numbered; what each rests on, what breaks if wrong
+## Consequences          — for users, other code, ops, cost; what can't be undone
+## Verification          — how each Done-when item will be shown to hold
+## Open questions        — each with a default and its weight:
+                           blocks the plan / changes a step / detail
+## Standards gaps        — missing tests, rules or tools, each with a fix
+                           (L3 always, L2 when found)
+```
+
+**L3 refines before posting.** It does up to three rounds of:
+
+1. research, with subagents settling assumptions;
+2. a fresh critic subagent reviewing against the rubric;
+3. a revision.
+
+It posts at L3 only if the critic raises no blocking finding and no open
+question "blocks the plan". Otherwise it posts as L2 and lists what is
+unresolved. Standards gaps become `AGENTS.md` lines in the PR, or new
+sub-issues (`ticket new`).
+
+## 10. Changes this needs
+
+**ais / flow (Go):**
+
+- **Profiles:** a `batch` template (built in for claude and pi) and
+  `ais run --batch`.
+- **Refinement:**
+  - `proposals.kind` (`work`|`refine`);
+  - a `refine` table (ticket, version, level, round, outcome, at);
+  - the sweep in dispatch, and self-`done` on exit for refine runs;
+  - `[workspace.<ws>.refine]` and the `refinement` status in `source`.
+- **The task layer:**
+  - a `Source` interface;
+  - `ais flow ticket show|comment|assess|refine|close|new|plan`;
+  - rendering and parsing of the refinement block;
+  - a version hash;
+  - level, reasons and round in `ais flow ready --json`.
+- **The plan PR:**
+  - `ais flow plan open|update|approve|check`, which can't reuse the planner's
+    `plan` verb, so a new name is needed (§12, Q1);
+  - the check inside `ais flow done`;
+  - the pre-push hook.
+- **Phases:**
+  - `phase` and `plan_url` on proposals;
+  - "waiting for review" and "still L1" groups in `ais flow ls`.
+
+**Skills** (shared, via `agents-maintenance`):
+
+- `~/.agents/shared/autonomy.md`: the levels, the rubric, the plan template,
+  the L3 loop.
+- **`refine-ticket`** (new, headless): §5.2. Its rules are to never ask
+  interactively, never touch code, never edit my text, and to always end with
+  `assess` or `refine`.
+- **`work-tickets`:**
+  - take `--autonomy`;
+  - trust a current assessment, or re-check;
+  - hand an L1 ticket back to refinement (`ticket refine`) and end there,
+    rather than plan from it;
+  - plan PR at L2/L3;
+  - `ais flow ticket` instead of `gh issue`.
+- **`plan-sessions`:** show level, round and the limit flag; take
+  `--autonomy` on `queue add`; use `ais flow ticket` for reading tickets.
+- **`plan-to-tickets`:** `ais flow ticket new`.
+
+## 11. Build plan
+
+1. **Spike.**
+   - Does `claude -p` / `pi -p` run a skill from the first prompt, with
+     subagents?
+   - Can a refinement block survive real edits on gpwsoi/3?
+   - Does a branch rewrite on a draft PR keep its review comments readable?
+     They'd be marked "outdated", which is fine.
+2. **The task layer.** The `Source` interface, `ais flow ticket show|comment|
+   close|new`, and the move of `work-tickets` and `plan-sessions` off `gh`.
+   This is useful on its own and makes everything after it source-agnostic.
+3. **Plan PR.** `plan open|update|approve|check`, the check in `done`, the
+   pre-push hook, and `work-tickets` at L2 with the plan PR. Usable by hand
+   at once.
+4. **Refinement.** `batch` templates, `kind=refine`, the sweep, self-done,
+   `ticket assess|refine`, the block, the `refinement` status, and the
+   `refine-ticket` skill. Live on soi with `max_rounds = 3`.
+5. **L3.** The research/critic loop in `work-tickets`, tried on tickets that
+   refinement scored L3.
+6. **Later:**
+   - the review nudge;
+   - a weekly count of levels and their reasons per workspace, which shows
+     which ticket-writing habits to fix;
+   - an artifact view of big plans.
+
+## 12. Open questions
+
+1. **Naming.** `ais flow plan` already means the planner. The plan PR commands
+   need another verb: `ais flow proposal open|update|approve|check`? Or
+   `ais flow review …`? *Default: `ais flow review`.*
+2. **Approval gate.** Require a GitHub "Approve" review, with `--by-hand` as
+   the escape? On your own repos you can't approve your own PR. The session
+   pushes as you, so GitHub won't let you approve a PR "you" opened.
+   *Default: `--by-hand` is the normal path: you say "approved" in the session
+   and it runs `approve`. A GitHub approval also counts where one is possible.*
+3. **Refinement status name.** Does gpwsoi/3 get a new `refinement` option, or
+   do we reuse an existing one (e.g. `Todo`)? A new one is clearer, and
+   `ais flow install` can check that it exists. *Default: new option
+   `refinement`.*
+4. **Refine runs on the WIP.** Should they share the workspace's `wip`, or have
+   their own small cap (`refine.wip = 1`), so a burst of ready tickets can't
+   starve work sessions? *Default: their own cap of 1, inside the global
+   `wip`.*
