@@ -23,6 +23,7 @@ type runArgs struct {
 	DryRun      bool
 	Prompt      *string  // --prompt TEXT
 	PromptFile  string   // --prompt-file PATH, "-" for stdin
+	Batch       bool     // --batch: no conversation, the prompt run to its end
 	Repos       []string // --repos: a worktree of each, side by side
 }
 
@@ -109,10 +110,15 @@ func cmdRun(a runArgs, harnessArgv []string) int {
 	prompt := firstPrompt(a)
 	var promptArgs []string
 	if prompt != "" {
-		if len(st.Prompt) == 0 {
+		tmpl := st.Prompt
+		if a.Batch {
+			if tmpl = st.Batch; len(tmpl) == 0 {
+				die(`profile %s cannot run a prompt without a conversation; give it batch = ["-p", "--", "{prompt}"] under [profile.%s]`, harness, harness)
+			}
+		} else if len(tmpl) == 0 {
 			die(`profile %s takes no first prompt; give it one with prompt = ["--", "{prompt}"] under [profile.%s]`, harness, harness)
 		}
-		for _, part := range st.Prompt {
+		for _, part := range tmpl {
 			promptArgs = append(promptArgs, strings.ReplaceAll(part, "{prompt}", prompt))
 		}
 	}

@@ -186,6 +186,7 @@ func startSession(aisArgs, harnessArgv []string) int {
 		{names: []string{"-h", "--help"}, kind: flagOpt},
 		{names: []string{"--prompt"}, kind: valueOpt},
 		{names: []string{"--prompt-file"}, kind: valueOpt},
+		{names: []string{"--batch"}, kind: flagOpt},
 		{names: []string{"--repos"}, kind: listOpt},
 	}, worktreeOpts...), true)
 	if p.flags["-h"] {
@@ -206,6 +207,7 @@ func startSession(aisArgs, harnessArgv []string) int {
 		DryRun:      p.flags["-n"],
 		Prompt:      p.value("--prompt"),
 		PromptFile:  p.values["--prompt-file"],
+		Batch:       p.flags["--batch"],
 	}
 	for _, list := range p.lists["--repos"] {
 		for _, repo := range strings.Split(list, ",") {
@@ -214,7 +216,10 @@ func startSession(aisArgs, harnessArgv []string) int {
 			}
 		}
 	}
-	if a.Fork != "" && (len(a.Repos) > 0 || a.Prompt != nil || a.PromptFile != "") {
+	if a.Batch && a.Prompt == nil && a.PromptFile == "" {
+		die("--batch runs the harness on a prompt until it is done; give it one with --prompt or --prompt-file")
+	}
+	if a.Fork != "" && (len(a.Repos) > 0 || a.Prompt != nil || a.PromptFile != "" || a.Batch) {
 		die("--fork continues a conversation in the session's own directory; --repos and --prompt have nothing to do there")
 	}
 	if a.Fork != "" && (a.Worktree != nil && *a.Worktree || a.From != "" || a.Detach != nil) {

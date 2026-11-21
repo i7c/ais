@@ -147,7 +147,10 @@ type sessionConf struct {
 type settings struct {
 	// Prompt is how the harness takes its first message: argv with {prompt}
 	// in it, appended last. Empty when the profile cannot be given one.
-	Prompt       []string
+	Prompt []string
+	// Batch is how it runs one prompt to the end and exits, the same way:
+	// what flow's refinement runs use. Empty when it cannot.
+	Batch        []string
 	Flags        []string
 	Env          map[string]string
 	Command      []string
@@ -187,7 +190,8 @@ func harnessSettings(cfg config, harness string) settings {
 		command = []string{harness}
 	}
 	return settings{
-		Prompt:       promptTemplate(specific, harness, command),
+		Prompt:       promptTemplate(specific, "prompt", builtinPrompt, harness, command),
+		Batch:        promptTemplate(specific, "batch", builtinBatch, harness, command),
 		Flags:        flags,
 		Env:          env,
 		Command:      command,
@@ -203,19 +207,22 @@ func harnessSettings(cfg config, harness string) settings {
 // claude (verified 2026-11-20).
 var builtinPrompt = []string{"--", "{prompt}"}
 
-// promptTemplate is [profile.<name>] prompt, else the built-in one for a
-// harness ais knows by name; prompt = [] turns it off.
-func promptTemplate(specific map[string]any, harness string, command []string) []string {
-	if v, ok := specific["prompt"]; ok {
-		tmpl := stringList(v, "prompt for "+harness)
+// builtinBatch runs one prompt and exits: -p (--print) in both claude and pi.
+var builtinBatch = []string{"-p", "--", "{prompt}"}
+
+// promptTemplate is [profile.<name>] <key> (prompt or batch), else the
+// built-in one for a harness ais knows by name; <key> = [] turns it off.
+func promptTemplate(specific map[string]any, key string, builtin []string, harness string, command []string) []string {
+	if v, ok := specific[key]; ok {
+		tmpl := stringList(v, key+" for "+harness)
 		if len(tmpl) > 0 && !anyContains(tmpl, "{prompt}") {
-			die("config: prompt for %s must contain {prompt} somewhere", harness)
+			die("config: %s for %s must contain {prompt} somewhere", key, harness)
 		}
 		return tmpl
 	}
 	for _, name := range []string{harness, filepath.Base(command[0])} {
 		if _, known := harnesses[filepath.Base(name)]; known {
-			return builtinPrompt
+			return builtin
 		}
 	}
 	return nil

@@ -25,6 +25,15 @@ func TakesPrompt(cfg map[string]any, profile string) (ok bool, err error) {
 	return
 }
 
+// TakesBatch is whether profile can run a prompt to its end and exit.
+func TakesBatch(cfg map[string]any, profile string) (ok bool, err error) {
+	err = catch(func() { ok = len(harnessSettings(config(cfg), profile).Batch) > 0 })
+	return
+}
+
+// Tilde writes a path under $HOME as ~/...
+func Tilde(path string) string { return tilde(path) }
+
 // ExpandPath is ~ and $VAR expansion as ais does it in config values.
 func ExpandPath(s string) string { return expand(s) }
 
