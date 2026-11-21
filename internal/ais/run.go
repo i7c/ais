@@ -24,6 +24,7 @@ type runArgs struct {
 	Prompt      *string  // --prompt TEXT
 	PromptFile  string   // --prompt-file PATH, "-" for stdin
 	Batch       bool     // --batch: no conversation, the prompt run to its end
+	Headless    bool     // --headless: --batch with no tmux pane, output to a log
 	Repos       []string // --repos: a worktree of each, side by side
 }
 
@@ -91,7 +92,10 @@ func reposRequest(paths []string, a runArgs) *wtRequest {
 
 func cmdRun(a runArgs, harnessArgv []string) int {
 	cfg := loadConfig()
-	pane := requireTmux()
+	pane := ""
+	if !a.Headless {
+		pane = requireTmux()
+	}
 	if a.Fork != "" {
 		return runFork(a, cfg, pane, harnessArgv)
 	}
@@ -139,9 +143,11 @@ func cmdRun(a runArgs, harnessArgv []string) int {
 	// the conversation, it does not ask the first question again.
 	argv := concat(st.Command, st.Flags, sessionFlags, harnessArgs, promptArgs)
 
-	location := captureLocation(pane)
-	if location == nil {
-		die("could not read the tmux location of pane %s", pane)
+	var location map[string]string
+	if !a.Headless {
+		if location = captureLocation(pane); location == nil {
+			die("could not read the tmux location of pane %s", pane)
+		}
 	}
 	args := append([]string{}, harnessArgs...)
 	r := &Record{
@@ -162,6 +168,7 @@ func cmdRun(a runArgs, harnessArgv []string) int {
 		// the proposal's.
 		FlowProposal: os.Getenv("AIS_FLOW_PROPOSAL"),
 		FlowPlanner:  os.Getenv("AIS_FLOW_PLANNER"),
+		Headless:     a.Headless,
 	}
 	want := many
 	if root != "" {
@@ -326,6 +333,9 @@ func launch(r *Record, argv []string, st settings, want *wtRequest, dryRun bool)
 	} else {
 		mutate(func(ss []*Record) []*Record {
 			r.ID = newID(ss)
+			if r.Headless {
+				r.Log = logPath(r.ID)
+			}
 			return append(ss, r)
 		})
 		// Settle the name now rather than leaving it to the first "ais name":
@@ -386,7 +396,10 @@ func launch(r *Record, argv []string, st settings, want *wtRequest, dryRun bool)
 		}
 		fmt.Println("cwd:    ", tilde(r.Cwd))
 		fmt.Println("tmux:   ", tmuxLabel(r))
-		if st.RenameWindow {
+		if r.Headless {
+			fmt.Println("log:    ", tilde(logPath(r.ID)))
+		}
+		if st.RenameWindow && !r.Headless {
 			fmt.Println("window: ", windowName(r))
 		}
 		return 0
@@ -411,6 +424,17 @@ func launch(r *Record, argv []string, st settings, want *wtRequest, dryRun bool)
 
 	child := &exec.Cmd{Path: exe, Args: argv, Dir: r.Cwd, Env: envList(env),
 		Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr}
+	if r.Headless {
+		// No terminal to talk to: nothing to read, and everything it says
+		// goes to the session's log, for "ais log".
+		out, err := openLog(r.Log)
+		if err != nil {
+			finish(r.ID, 126)
+			die("cannot open the session log %s: %v", tilde(r.Log), err)
+		}
+		defer out.Close()
+		child.Stdin, child.Stdout, child.Stderr = nil, out, out
+	}
 	// Handled, not ignored: exec resets handled signals to their default in
 	// the child, whereas an ignored one would be inherited, and Ctrl-C would
 	// stop working inside the harness. SIGINT and SIGWINCH reach the child

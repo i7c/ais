@@ -43,6 +43,19 @@ func reap(ss []*Record) int {
 		if pid == 0 {
 			pid = s.LauncherPID // see launch()
 		}
+		if s.Headless {
+			// No pane to check: the process is the only sign of life.
+			if processAlive(pid) {
+				continue
+			}
+			s.Status = "dead"
+			if s.EndedAt == nil || *s.EndedAt == "" {
+				s.EndedAt = strPtr(nowISO())
+			}
+			s.Reaped = true
+			reaped++
+			continue
+		}
 		paneID := s.Tmux["pane_id"]
 		loc, paneLive := panes[paneID]
 		// pids get reused, so require both signals before declaring death

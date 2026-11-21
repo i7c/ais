@@ -274,6 +274,9 @@ func markPane(pane string, r *Record) func() {
 }
 
 func tmuxLabel(r *Record) string {
+	if r.Headless {
+		return "headless"
+	}
 	if len(r.Tmux) == 0 {
 		return "-"
 	}

@@ -69,6 +69,9 @@ func sessionAtPane(pane string, ss []*Record) string {
 // not where it started: panes move between windows and sessions.
 func jumpTo(r *Record, client string) int {
 	pane := r.Tmux["pane_id"]
+	if r.Headless {
+		die("session %s is headless and has no pane; read it with %s log %s", r.ID, prog, r.ID)
+	}
 	if pane == "" {
 		die("session %s has no recorded tmux location", r.ID)
 	}

@@ -285,6 +285,7 @@ func cmdPrune(all bool, days float64, keepWorktrees bool) int {
 				kept = append(kept, s)
 			}
 		}
+		archive(dropped) // "ais runs" and "ais stats" still see them
 		return kept
 	})
 	note("pruned %d dead session(s)", len(dropped))

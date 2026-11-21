@@ -187,6 +187,7 @@ func startSession(aisArgs, harnessArgv []string) int {
 		{names: []string{"--prompt"}, kind: valueOpt},
 		{names: []string{"--prompt-file"}, kind: valueOpt},
 		{names: []string{"--batch"}, kind: flagOpt},
+		{names: []string{"--headless"}, kind: flagOpt},
 		{names: []string{"--repos"}, kind: listOpt},
 	}, worktreeOpts...), true)
 	if p.flags["-h"] {
@@ -207,7 +208,8 @@ func startSession(aisArgs, harnessArgv []string) int {
 		DryRun:      p.flags["-n"],
 		Prompt:      p.value("--prompt"),
 		PromptFile:  p.values["--prompt-file"],
-		Batch:       p.flags["--batch"],
+		Batch:       p.flags["--batch"] || p.flags["--headless"],
+		Headless:    p.flags["--headless"],
 	}
 	for _, list := range p.lists["--repos"] {
 		for _, repo := range strings.Split(list, ",") {
@@ -218,6 +220,9 @@ func startSession(aisArgs, harnessArgv []string) int {
 	}
 	if a.Batch && a.Prompt == nil && a.PromptFile == "" {
 		die("--batch runs the harness on a prompt until it is done; give it one with --prompt or --prompt-file")
+	}
+	if a.Headless && a.PromptFile == "-" {
+		die("--headless has no terminal; give the prompt with --prompt or --prompt-file PATH")
 	}
 	if a.Fork != "" && (len(a.Repos) > 0 || a.Prompt != nil || a.PromptFile != "" || a.Batch) {
 		die("--fork continues a conversation in the session's own directory; --repos and --prompt have nothing to do there")
@@ -235,7 +240,7 @@ func startSession(aisArgs, harnessArgv []string) int {
 }
 
 var commands = []string{
-	"select", "ls", "status", "notify", "prune", "current", "name",
+	"select", "ls", "status", "runs", "log", "stats", "notify", "prune", "current", "name",
 	"restart", "install", "instructions", "wt", "state", "env",
 	"_preview", "_session-seen", "_mark-seen", "_activity",
 }
@@ -293,6 +298,44 @@ func dispatch(argv []string) int {
 			window = &f
 		}
 		return cmdLs(p.flags["-a"], cmd == "status", window)
+	case "runs":
+		p := parse(rest, []option{
+			{names: []string{"--since"}, kind: valueOpt},
+			{names: []string{"--kind"}, kind: valueOpt, choices: runKinds},
+			{names: []string{"--active"}, kind: flagOpt},
+			{names: []string{"-a", "--all"}, kind: flagOpt},
+			{names: []string{"-n", "--limit"}, kind: valueOpt},
+			{names: []string{"--json"}, kind: flagOpt},
+		}, false)
+		noPositionals(p, 0)
+		limit := 30
+		if v := p.value("-n"); v != nil {
+			n, err := strconv.Atoi(*v)
+			if err != nil || n < 1 {
+				dieCode(2, "error: argument -n/--limit: a whole number, 1 or more: %s", pyRepr(*v))
+			}
+			limit = n
+		}
+		if p.flags["-a"] || p.flags["--json"] && p.value("-n") == nil {
+			limit = 0
+		}
+		return cmdRuns(runsArgs{Since: p.values["--since"], Kind: p.values["--kind"], Active: p.flags["--active"],
+			Limit: limit, JSON: p.flags["--json"]})
+	case "log":
+		p := parse(rest, []option{
+			{names: []string{"--full"}, kind: flagOpt},
+			{names: []string{"-f", "--follow"}, kind: flagOpt},
+			{names: []string{"--path"}, kind: flagOpt},
+		}, false)
+		noPositionals(p, 1)
+		if len(p.pos) == 0 {
+			dieCode(2, "error: the following arguments are required: id")
+		}
+		return cmdLog(logArgs{ID: p.pos[0], Full: p.flags["--full"], Follow: p.flags["-f"], Path: p.flags["--path"]})
+	case "stats":
+		p := parse(rest, []option{{names: []string{"--json"}, kind: flagOpt}}, false)
+		noPositionals(p, 0)
+		return cmdStats(p.flags["--json"])
 	case "notify":
 		p := parse(rest, []option{
 			{names: []string{"-t", "--title"}, kind: valueOpt},

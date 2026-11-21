@@ -42,6 +42,10 @@ type Record struct {
 	LastInputAt       string `json:"last_input_at,omitempty"` // when you last sent the harness a prompt
 	FlowProposal      string `json:"flow_proposal,omitempty"` // the ais flow proposal this session works on
 	FlowPlanner       string `json:"flow_planner,omitempty"`  // the ais flow planner this session is
+	// Headless sessions run with no tmux pane and no terminal (ais run
+	// --headless); what the harness prints goes to Log.
+	Headless bool   `json:"headless,omitempty"`
+	Log      string `json:"log,omitempty"`
 	Notes             []Note `json:"notifications,omitempty"`
 
 	Extra map[string]json.RawMessage `json:"-"`
@@ -121,7 +125,8 @@ func knownKeys(v any) map[string]bool {
 		for _, k := range []string{"id", "description", "profile", "harness", "command", "harness_args",
 			"session_ids", "status", "pid", "launcher_pid", "hostname", "cwd", "tmux", "started_at",
 			"ended_at", "exit_code", "slug", "worktree", "restart_of", "fork_of", "reaped", "notifications",
-			"initial_prompt", "initial_prompt_seen", "last_input_at", "flow_proposal", "flow_planner"} {
+			"initial_prompt", "initial_prompt_seen", "last_input_at", "flow_proposal", "flow_planner",
+			"headless", "log"} {
 			names[k] = true
 		}
 	case *Note:
