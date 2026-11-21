@@ -1,6 +1,6 @@
 # Proposal: autonomy levels, ticket refinement and plan review
 
-Status: **draft, round 2** (2026-11-21)
+Status: **draft, round 3** (2026-11-21)
 
 ## 1. What this is for
 
@@ -37,6 +37,11 @@ spent before I approve a plan.** Refinement writes only to the ticket.
 | Harnesses | Every profile that has a non-interactive template can run refinement. That is claude and pi built in (§7). |
 | Planner-side questions, review nudge | Not in v1. |
 | Risk (R7) | Caps the level at L2; it does not force L1. |
+| Plan PR commands | `ais flow review open\|update\|approve\|check`. |
+| Approval | Normally you say "approved" in the session and it runs `review approve --by-hand`. A GitHub approval also counts where one is possible. |
+| New status | `refinement`, a new option on the board. `ais flow install` checks that it exists. |
+| Refinement WIP | Refine runs get their own cap, `refine.wip = 1`, inside the global `wip`. |
+| Role prompts | Built into ais, not skills. They can be overridden through config (§12). |
 
 ## 3. The lifecycle of a ticket
 
@@ -321,7 +326,7 @@ Still to verify in a spike:
 ### 8.1 How it works
 
 At L2/L3, the work session writes its plan (shape in §9) and runs
-`ais flow plan open`. That command:
+`ais flow review open`. That command:
 
 1. writes `plans/<ticket-number>.md` in the worktree of the ticket's `Repo:`;
 2. commits it alone, with the trailer `Ais-Plan: <ticket url>`;
@@ -329,7 +334,7 @@ At L2/L3, the work session writes its plan (shape in §9) and runs
 4. links the PR on the ticket (`ticket plan`), records phase `plan` on the
    proposal, and notifies me.
 
-Revisions go through `ais flow plan update`, which makes another plan-only
+Revisions go through `ais flow review update`, which makes another plan-only
 commit with the same trailer, so I see the diff between revisions in the PR.
 
 I review in GitHub: line comments, suggestions, "Request changes" to send it
@@ -337,7 +342,7 @@ back. When I'm done, I tell the session "reviewed" and it reads the review.
 
 ### 8.2 Approval removes the plan — in tooling
 
-`ais flow plan approve` is the gate. It refuses unless the PR has an approving
+`ais flow review approve` is the gate. It refuses unless the PR has an approving
 review from me, or I run it myself with `--by-hand`. Then it:
 
 1. copies the final plan into the PR description, under "Plan (approved
@@ -350,7 +355,7 @@ review from me, or I run it myself with `--by-hand`. Then it:
 
 Implementation commits come after this, on the same branch and the same PR.
 
-**`ais flow plan check`** is the safety net. It fails if, in any of the
+**`ais flow review check`** is the safety net. It fails if, in any of the
 session's worktrees, `base..HEAD` contains a commit with `Ais-Plan`, or the
 tree contains `plans/<n>.md` for one of the session's tickets. It runs:
 
@@ -411,7 +416,7 @@ sub-issues (`ticket new`).
   - a version hash;
   - level, reasons and round in `ais flow ready --json`.
 - **The plan PR:**
-  - `ais flow plan open|update|approve|check`, which can't reuse the planner's
+  - `ais flow review open|update|approve|check`, which can't reuse the planner's
     `plan` verb, so a new name is needed (§12, Q1);
   - the check inside `ais flow done`;
   - the pre-push hook.
@@ -448,7 +453,7 @@ sub-issues (`ticket new`).
 2. **The task layer.** The `Source` interface, `ais flow ticket show|comment|
    close|new`, and the move of `work-tickets` and `plan-sessions` off `gh`.
    This is useful on its own and makes everything after it source-agnostic.
-3. **Plan PR.** `plan open|update|approve|check`, the check in `done`, the
+3. **Plan PR.** `review open|update|approve|check`, the check in `done`, the
    pre-push hook, and `work-tickets` at L2 with the plan PR. Usable by hand
    at once.
 4. **Refinement.** `batch` templates, `kind=refine`, the sweep, self-done,
@@ -462,21 +467,91 @@ sub-issues (`ticket new`).
      which ticket-writing habits to fix;
    - an artifact view of big plans.
 
-## 12. Open questions
+## 12. Role prompts are built into ais
 
-1. **Naming.** `ais flow plan` already means the planner. The plan PR commands
-   need another verb: `ais flow proposal open|update|approve|check`? Or
-   `ais flow review …`? *Default: `ais flow review`.*
-2. **Approval gate.** Require a GitHub "Approve" review, with `--by-hand` as
-   the escape? On your own repos you can't approve your own PR. The session
-   pushes as you, so GitHub won't let you approve a PR "you" opened.
-   *Default: `--by-hand` is the normal path: you say "approved" in the session
-   and it runs `approve`. A GitHub approval also counts where one is possible.*
-3. **Refinement status name.** Does gpwsoi/3 get a new `refinement` option, or
-   do we reuse an existing one (e.g. `Todo`)? A new one is clearer, and
-   `ais flow install` can check that it exists. *Default: new option
-   `refinement`.*
-4. **Refine runs on the WIP.** Should they share the workspace's `wip`, or have
-   their own small cap (`refine.wip = 1`), so a burst of ready tickets can't
-   starve work sessions? *Default: their own cap of 1, inside the global
-   `wip`.*
+### 12.1 Why not skills
+
+The planner, refinement and work-session instructions used to be skills in
+`~/.agents/skills/`. On a machine without that setup, a dispatched session
+gets `/plan-sessions soi` and has nothing to run. Skills fit badly here:
+
+- **They are protocol, not preference.** `plan-sessions` is almost entirely
+  "call these `ais flow` commands in this order". `refine-ticket` and the flow
+  half of `work-tickets` are the same. A skill that drifts from the binary
+  breaks, silently. A prompt embedded in the binary always matches the
+  commands it calls.
+- **Little in them is personal.** The personal and project facts sit in
+  `ticket-targets/gpwsoi.md`: issue repo, code repos, ADR home, closing
+  reference, board automation, issue types, title conventions. Those are
+  workspace facts, and they belong in the workspace config.
+- **Each harness finds skills its own way.** A prompt ais hands over works the
+  same on every harness, interactive or `-p`.
+
+What skills did well, and how ais keeps it:
+
+| Skills gave | ais keeps it by |
+|---|---|
+| Edit and it takes effect, no rebuild | Override files in config (§12.3). |
+| Loaded only when needed | The prompts are small (about 2k tokens each). The long reference, the rubric, is printed on demand by `ais flow prompt rubric`. |
+| Shared across harnesses through `~/.agents` | Every harness gets the same prompt from the same binary. |
+
+### 12.2 How it works
+
+- **Where the prompts live.** `internal/flow/prompts/` holds `planner.md`,
+  `refine.md`, `work.md` and `rubric.md`, embedded with `go:embed`. Each has a
+  `version:` header.
+- **How a session gets one.** `ais flow start` renders the role's prompt with
+  its context filled in:
+  - workspace, tickets, repos → paths → branches;
+  - level and ceiling, round, notes;
+  - the workspace instructions (§12.3).
+
+  It hands the rendered text to the harness as the first prompt, through the
+  profile's `prompt` or `batch` template. A file under `~/.ais` would also
+  work, but the first prompt is what every harness takes as my instruction,
+  and the idle tracker already compares against it.
+- **Inspecting it.** `ais flow prompt show <role> [--ws <ws>] [--proposal
+  <id>]` prints exactly what a session got or would get.
+
+### 12.3 Overriding, in layers
+
+```toml
+[workspace.soi]
+instructions = "~/.ais/workspaces/soi.md"    # appended to every role's prompt
+
+[workspace.soi.ticket]                       # facts, not prose; ais uses them
+issue_repo = "gpwsoi/org"                    #   itself (closing refs, ADR path)
+adr_home = "gpwsoi/adr:adrs/"
+closing_ref = "Fixes {repo}#{n}"
+automation = true
+
+[workspace.soi.planner]
+instructions = "Prefer one session per repo."   # appended to this role only
+# prompt_file = "~/.ais/prompts/planner.md"    # full replacement; last resort
+# prompt = "/plan-sessions soi"                # still honoured, as today
+```
+
+- **Append, don't replace.** Most changes are additions, such as "in soi, ADRs
+  go to gpwsoi/adr". Appended instructions keep getting the built-in prompt's
+  fixes.
+- **A full replacement records the version it was written against.**
+  `ais flow doctor` warns when the built-in prompt has moved on since.
+- **`prompt` keeps working.** Today's config, which points at a skill, keeps
+  running until I change it.
+
+### 12.4 What happens to the skills
+
+- **`plan-sessions`:** deleted once the built-in planner prompt is in. Only
+  flow ever ran it.
+- **`refine-ticket`:** never written as a skill. It is `refine.md` from the
+  start.
+- **`work-tickets`:** I also run it by hand, outside flow. It becomes a thin
+  skill: "run `ais flow prompt show work --tickets <refs>` and follow it". The
+  procedure exists once, in ais, and both paths use it. Its `ticket-targets/`
+  profiles move into the workspace's `[ticket]` config.
+- **`plan-to-tickets`:** stays a skill for now. flow doesn't start it, but it
+  moves to `ais flow ticket new`. It can become a built-in role later with the
+  same thin-skill pattern.
+
+**Build plan:** this goes into step 2, with the task layer. The prompts are
+written once, against `ais flow ticket`, rather than migrated twice.
