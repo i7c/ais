@@ -56,12 +56,19 @@ func splitRefinement(body string) (string, *Refinement) {
 	if r.Log == nil {
 		r.Log = []RoundLog{}
 	}
-	for _, l := range r.Log {
+	r.Rounds = roundsIn(r.Log)
+	return strings.TrimRight(body[:m[0]], " \n"), r
+}
+
+// roundsIn counts the rounds that went back to you (L1 outcomes).
+func roundsIn(log []RoundLog) int {
+	n := 0
+	for _, l := range log {
 		if l.Level == "L1" && l.Flag == "" {
-			r.Rounds++
+			n++
 		}
 	}
-	return strings.TrimRight(body[:m[0]], " \n"), r
+	return n
 }
 
 // ticketVersion is what "the ticket changed" means: its title, its body and
@@ -147,12 +154,7 @@ func renderBlock(in *RefineInput, log []RoundLog, maxRounds int, limit bool) str
 	var b strings.Builder
 	meta, _ := json.Marshal(map[string]any{"v": 1, "log": log})
 	fmt.Fprintf(&b, "%s%s -->\n", blockOpen, meta)
-	rounds := 0
-	for _, l := range log {
-		if l.Level == "L1" && l.Flag == "" {
-			rounds++
-		}
-	}
+	rounds := roundsIn(log)
 	last := log[len(log)-1]
 	head := fmt.Sprintf("## Refinement · %s · %s", last.Level, last.At)
 	switch {
@@ -429,6 +431,11 @@ func cmdTicketRefine(args []string) error {
 // writeRound renders the block into the ticket, records the assessment for
 // the version the tracker now holds, and for an L1 outcome under the round
 // limit moves the ticket to the refinement status and says so in a comment.
+//
+// That is several calls, and any of them can fail with the body written. The
+// round is therefore noted before the first and the note dropped after the
+// last: tried again, it replaces what the stopped write left on the ticket
+// instead of counting as another round.
 func (t *ticketCmd) writeRound(in *RefineInput, l1 bool) (*Assessment, error) {
 	is, err := t.src.Issue(t.url)
 	if err != nil {
@@ -439,18 +446,26 @@ func (t *ticketCmd) writeRound(in *RefineInput, l1 bool) (*Assessment, error) {
 	if old != nil {
 		log = old.Log
 	}
+	var tried []string
+	if w := t.unfinishedRound(); w != nil && old != nil && contains(w.Wrote, blockHash(old)) {
+		log, tried = w.Before, w.Wrote
+	}
+	before, rounds := log, roundsIn(log)
 	day := now().Local().Format(time.DateOnly)
 	entry := RoundLog{At: day, Level: in.Level, Questions: len(in.Questions)}
 	limit := false
 	var extra int
 	t.db.QueryRow(`SELECT CAST(value AS INTEGER) FROM meta WHERE key = ?`, "extra-rounds:"+t.url).Scan(&extra)
-	if l1 && old != nil && old.Rounds >= t.w.Refine.MaxRounds+extra {
+	if l1 && rounds >= t.w.Refine.MaxRounds+extra {
 		limit = true
 		entry.Flag = "refinement-limit"
 	}
-	log = append(log, entry)
-	block := renderBlock(in, log, t.w.Refine.MaxRounds, limit)
-	if err := t.src.SetBody(t.url, strings.TrimRight(body, " \n")+"\n\n"+block+"\n"); err != nil {
+	log = append(append([]RoundLog{}, log...), entry)
+	newBody := strings.TrimRight(body, " \n") + "\n\n" + renderBlock(in, log, t.w.Refine.MaxRounds, limit) + "\n"
+	if err := t.startRound(before, tried, newBody); err != nil {
+		return nil, err
+	}
+	if err := t.src.SetBody(t.url, newBody); err != nil {
 		return nil, err
 	}
 	// The version is what the tracker gives back, not what was sent: an
@@ -486,11 +501,7 @@ func (t *ticketCmd) writeRound(in *RefineInput, l1 bool) (*Assessment, error) {
 		if err != nil {
 			return a, fmt.Errorf("wrote the questions, but could not move the ticket to %q: %w", t.w.Refine.Status, err)
 		}
-		rounds := 1
-		if old != nil {
-			rounds = old.Rounds + 1
-		}
-		msg := fmt.Sprintf("Refinement round %d of %d (`ais flow`): %d question(s)", rounds, t.w.Refine.MaxRounds, len(in.Questions))
+		msg := fmt.Sprintf("Refinement round %d of %d (`ais flow`): %d question(s)", rounds+1, t.w.Refine.MaxRounds, len(in.Questions))
 		if len(in.Rewrite) > 0 {
 			msg += fmt.Sprintf(", %d part(s) to rewrite", len(in.Rewrite))
 		}
@@ -499,5 +510,42 @@ func (t *ticketCmd) writeRound(in *RefineInput, l1 bool) (*Assessment, error) {
 			logEvent(t.db, "comment-failed", t.url, err.Error())
 		}
 	}
+	t.db.Exec(`DELETE FROM meta WHERE key = ?`, roundKey(t.url))
 	return a, nil
+}
+
+// roundWrite is a round being written to a ticket: the log before it, and
+// the blocks tried so far, any of which may be the one on the ticket.
+type roundWrite struct {
+	Before []RoundLog `json:"before"`
+	Wrote  []string   `json:"wrote"`
+}
+
+func roundKey(url string) string { return "round-write:" + url }
+
+// blockHash tells a block apart from one edited since, an answer included.
+func blockHash(r *Refinement) string { return ticketVersion("", "", r) }
+
+func (t *ticketCmd) startRound(before []RoundLog, tried []string, newBody string) error {
+	_, ref := splitRefinement(newBody)
+	if ref == nil {
+		return fmt.Errorf("the refinement block does not read back; nothing was written")
+	}
+	_, err := t.db.Exec(`INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)`, roundKey(t.url),
+		toJSON(roundWrite{Before: before, Wrote: append(tried, blockHash(ref))}))
+	return err
+}
+
+// unfinishedRound is the last round written to the ticket, if it stopped
+// half way.
+func (t *ticketCmd) unfinishedRound() *roundWrite {
+	var text string
+	if t.db.QueryRow(`SELECT value FROM meta WHERE key = ?`, roundKey(t.url)).Scan(&text) != nil {
+		return nil
+	}
+	var w roundWrite
+	if json.Unmarshal([]byte(text), &w) != nil {
+		return nil
+	}
+	return &w
 }
