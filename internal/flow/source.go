@@ -139,25 +139,88 @@ func (p *project) Ready() ([]Item, error) {
 }
 
 // Find is the board's items for these ticket URLs, in order; a ticket not on
-// the board is an error, since its status could not be told.
+// the board is an error, since its status could not be told. It asks about
+// each ticket rather than listing the board: agents read tickets one after
+// the other, and GitHub's hourly limit is shared by everything you run.
 func (p *project) Find(urls []string) ([]Item, error) {
-	items, err := p.Items()
+	var out []Item
+	for _, u := range urls {
+		it, err := p.item(u)
+		if err != nil {
+			return nil, err
+		}
+		if it == nil {
+			return nil, fmt.Errorf("%s is not on project %s/%d", u, p.w.Source.Owner, p.w.Source.Project)
+		}
+		out = append(out, *it)
+	}
+	return out, nil
+}
+
+const itemQuery = `query($url: URI!, $field: String!) { resource(url: $url) { ... on Issue {
+  title
+  projectItems(first: 50, includeArchived: false) { nodes {
+    id
+    project { number owner { ... on Organization { login } ... on User { login } } }
+    status: fieldValueByName(name: $field) { ... on ProjectV2ItemFieldSingleSelectValue { name } }
+    autonomy: fieldValueByName(name: "Autonomy") {
+      ... on ProjectV2ItemFieldSingleSelectValue { name }
+      ... on ProjectV2ItemFieldTextValue { text }
+    }
+  } }
+} } }`
+
+// item is the board's item for one issue, or nil when it is not on it.
+func (p *project) item(url string) (*Item, error) {
+	out, err := ghRunner("api", "graphql", "-f", "query="+itemQuery, "-f", "url="+url, "-f", "field="+p.w.Source.Field)
 	if err != nil {
 		return nil, err
 	}
-	byURL := map[string]Item{}
-	for _, it := range items {
-		byURL[it.URL] = it
+	var data struct {
+		Data struct {
+			Resource *struct {
+				Title        string `json:"title"`
+				ProjectItems struct {
+					Nodes []struct {
+						ID      string `json:"id"`
+						Project struct {
+							Number int `json:"number"`
+							Owner  struct {
+								Login string `json:"login"`
+							} `json:"owner"`
+						} `json:"project"`
+						Status *struct {
+							Name string `json:"name"`
+						} `json:"status"`
+						Autonomy *struct {
+							Name string `json:"name"`
+							Text string `json:"text"`
+						} `json:"autonomy"`
+					} `json:"nodes"`
+				} `json:"projectItems"`
+			} `json:"resource"`
+		} `json:"data"`
 	}
-	var out []Item
-	for _, u := range urls {
-		it, ok := byURL[u]
-		if !ok {
-			return nil, fmt.Errorf("%s is not on project %s/%d", u, p.w.Source.Owner, p.w.Source.Project)
+	if err := json.Unmarshal(out, &data); err != nil {
+		return nil, fmt.Errorf("gh api graphql: %w", err)
+	}
+	if data.Data.Resource == nil {
+		return nil, nil
+	}
+	for _, n := range data.Data.Resource.ProjectItems.Nodes {
+		if n.Project.Number != p.w.Source.Project || !strings.EqualFold(n.Project.Owner.Login, p.w.Source.Owner) {
+			continue
 		}
-		out = append(out, it)
+		it := &Item{URL: url, Repo: repoOf(url), Number: numberOf(url), Title: data.Data.Resource.Title, ItemID: n.ID}
+		if n.Status != nil {
+			it.Status = n.Status.Name
+		}
+		if n.Autonomy != nil {
+			it.Autonomy = orDefault(n.Autonomy.Name, n.Autonomy.Text)
+		}
+		return it, nil
 	}
-	return out, nil
+	return nil, nil
 }
 
 type ghIDs struct {

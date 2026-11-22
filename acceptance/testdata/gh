@@ -6,7 +6,8 @@ comments.json (what "gh issue comment" was asked to post), closed (issue
 URLs "gh issue view" reports as closed), subissues.json ({issue URL: [its
 sub-issue URLs]}), blockedby.json ({issue URL: [URLs blocking it]}), calls.log (every
 call), and an optional "fail" file naming a subcommand ("item-edit",
-"item-list", "comment") that should fail.
+"item-list", "comment", "read-after-edit": "issue view" once a body was
+written) that should fail.
 
 Tickets: bodies.json ({issue URL: body}, what "issue edit --body-file"
 writes), closes.json (what "issue close" was asked), created.json (issues
@@ -68,7 +69,22 @@ elif args[:2] == ["project", "item-edit"]:
     else:
         sys.exit("no such item " + str(opt("--id")))
     json.dump(data, open(board, "w"))
+elif args[:2] == ["api", "graphql"]:
+    # The one query flow makes: an issue's items on its boards.
+    given = dict(a.split("=", 1) for a in args if "=" in a)
+    if "projectItems" not in given.get("query", ""):
+        sys.exit("fake gh does not know this query")
+    nodes = [{"id": it["id"], "project": {"number": 3, "owner": {"login": "gpwsoi"}},
+              "status": {"name": it["status"]} if it.get("status") else None,
+              "autonomy": {"name": it["autonomy"]} if it.get("autonomy") else None}
+             for it in load()["items"] if it["content"]["url"] == given["url"]]
+    other = {"id": "PVTI_elsewhere", "project": {"number": 9, "owner": {"login": "gpwsoi"}},
+             "status": {"name": "wrong board"}, "autonomy": None}
+    title = next((it["title"] for it in load()["items"] if it["content"]["url"] == given["url"]), "")
+    print(json.dumps({"data": {"resource": {"title": title, "projectItems": {"nodes": [other] + nodes}}}}))
 elif args[:2] == ["issue", "view"]:
+    if fail == "read-after-edit" and os.path.exists(os.path.join(root, "edited")):
+        sys.exit("GraphQL: API rate limit already exceeded")
     url = args[2]
     path = os.path.join(root, "closed")
     closed = open(path).read().split() if os.path.exists(path) else []
@@ -90,9 +106,13 @@ elif args[:2] == ["issue", "view"]:
                       "blockedBy": {"nodes": blockers, "totalCount": len(blockers)},
                       "closedByPullRequestsReferences": []}))
 elif args[:2] == ["issue", "edit"]:
+    if fail == "edit":
+        sys.exit("GraphQL: API rate limit already exceeded")
     bodies = jload("bodies.json", {})
     bodies[args[2]] = sys.stdin.read()
     jsave("bodies.json", bodies)
+    if fail == "read-after-edit":
+        open(os.path.join(root, "edited"), "w").close()
 elif args[:2] == ["issue", "close"]:
     closes = jload("closes.json", [])
     closes.append({"url": args[2], "reason": opt("--reason"), "comment": opt("--comment")})

@@ -28,7 +28,9 @@ the ticket, and you change the ticket only through `ais flow ticket` (never
   This shows the body, the comments, its ancestors to the top, its blockers
   with their last word, and the **Refinement block** if earlier rounds wrote
   one. That block holds the evidence, the decisions, and the author's answers
-  after `> Answer:`.
+  after `> Answer:`. Read a further ticket the same way when one of these
+  names it. Never go through the tracker ticket by ticket: every read spends
+  an hourly limit that everything the user runs shares.
 - The workspace's repos, to read (never to change):
 {{- range .Repos}}
   - `{{.Name}}`: `{{.Path}}`
