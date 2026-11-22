@@ -61,6 +61,7 @@ func (d *dispatcher) tick() error {
 	if err := closeDecidedPlanners(d.db, d.cfg, d.dry); err != nil {
 		return err
 	}
+	endWaits(d.db, d.cfg, d.dry)
 	started := 0
 	for {
 		p, why, err := d.next()

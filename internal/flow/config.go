@@ -63,6 +63,10 @@ type PlannerConf struct {
 	// a workspace, so declining everything does not bring the same question
 	// back every hour. A finished session (ais flow done) does not wait.
 	MinInterval time.Duration
+	// RefineWait is the longest a planner that would start by itself waits
+	// for the workspace's refinement runs, so that it sees all they let
+	// through; 0: it does not wait.
+	RefineWait time.Duration
 }
 
 type SessionConf struct {
@@ -201,6 +205,7 @@ func parseConfig(raw map[string]any) (*Config, error) {
 		w.Planner.IdleTimeout = r.duration(pl, "idle_timeout", where+".planner.idle_timeout", 48*time.Hour)
 		w.Planner.CloseAfter = r.durationOrZero(pl, "close_after", where+".planner.close_after", 5*time.Minute)
 		w.Planner.MinInterval = r.durationOrZero(pl, "min_interval", where+".planner.min_interval", 2*time.Hour)
+		w.Planner.RefineWait = r.durationOrZero(pl, "refine_wait", where+".planner.refine_wait", 30*time.Minute)
 		se := r.table(t, "session", "["+where+".session]")
 		w.Session = SessionConf{RoleConf: r.role(se, where+".session"),
 			Autonomy: r.level(se, "autonomy", where+".session.autonomy", "L2")}

@@ -130,8 +130,8 @@ func cmdPlan(args []string) error {
 
 // planWorkspace settles the open planner, then starts one if the mode's
 // checks pass: plannable work always; room for more sessions (running plus
-// queued below wip) unless asked by hand; and min_interval since the last
-// planner started, for the timer only.
+// queued below wip) and no refinement to wait for, unless asked by hand; and
+// min_interval since the last planner started, for the timer only.
 func planWorkspace(db *DB, cfg *Config, w *Workspace, mode planMode, dry bool) error {
 	if err := closeDecidedPlanners(db, cfg, dry); err != nil {
 		return err
@@ -187,12 +187,22 @@ func planWorkspace(db *DB, cfg *Config, w *Workspace, mode planMode, dry bool) e
 		}
 		return nil
 	}
+	// 4. Refinement still going? A planner reads the tickets once, so one
+	// that starts now would miss those about to become plannable.
+	if mode != planByHand {
+		if wait, why, err := refineWait(db, w, dry); err != nil {
+			return err
+		} else if wait {
+			note("no planner yet: %s", why)
+			return nil
+		}
+	}
 	if dry {
 		fmt.Fprintf(stdout, "would start a planner for %s: %d plannable ticket(s)\n", w.Name, n)
 		return nil
 	}
 
-	// 4. Start one. The unique index makes a race between two of these end
+	// 5. Start one. The unique index makes a race between two of these end
 	// with one planner, not two.
 	pl := &Planner{ID: newID("n"), Workspace: w.Name, State: "open", StartedAt: stamp(now())}
 	if _, err := db.Exec(`INSERT INTO planners (id, workspace, state, started_at) VALUES (?, ?, 'open', ?)`,
@@ -203,6 +213,7 @@ func planWorkspace(db *DB, cfg *Config, w *Workspace, mode planMode, dry bool) e
 		}
 		return err
 	}
+	db.Exec(`DELETE FROM meta WHERE key = ?`, waitKey(w.Name))
 	logEvent(db, "planner-started", pl.ID, map[string]any{"workspace": w.Name, "plannable": n,
 		"by": map[planMode]string{planByHand: "hand", planScheduled: "timer", planAfterDone: "a finished session"}[mode]})
 	pane, err := openPane(w.TmuxSession, home())
@@ -216,6 +227,81 @@ func planWorkspace(db *DB, cfg *Config, w *Workspace, mode planMode, dry bool) e
 	note("started planner %s for %s (%d plannable ticket(s)) in %s", pl.ID, w.Name, n, w.TmuxSession+":"+pane)
 	fmt.Fprintln(stdout, pl.ID)
 	return nil
+}
+
+// waitKey is the meta key holding since when a planner of the workspace has
+// been waiting for refinement.
+func waitKey(ws string) string { return "planner-wait:" + ws }
+
+// waitingSince is since when a planner of the workspace waits for
+// refinement, if one does.
+func waitingSince(db *DB, ws string) (time.Time, bool) {
+	var since string
+	db.QueryRow(`SELECT value FROM meta WHERE key = ?`, waitKey(ws)).Scan(&since)
+	return parseStamp(since)
+}
+
+// refining counts the workspace's refinement runs queued or going.
+func refining(db *DB, ws string) (int, error) {
+	c, err := countFor(db, ws, "refine")
+	return c.Queued + c.Running, err
+}
+
+// refineWait is whether a planner should wait for the workspace's refinement
+// runs. The wait is counted from its start, not per run, so that neither a
+// run that hangs nor new ones that keep coming hold planning back for longer
+// than refine_wait.
+func refineWait(db *DB, w *Workspace, dry bool) (bool, string, error) {
+	n, err := refining(db, w.Name)
+	if err != nil || n == 0 || w.Planner.RefineWait == 0 {
+		return false, "", err
+	}
+	since, waiting := waitingSince(db, w.Name)
+	if waiting && now().Sub(since) >= w.Planner.RefineWait {
+		return false, "", nil
+	}
+	if !waiting && !dry {
+		if _, err := db.Exec(`INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)`, waitKey(w.Name), stamp(now())); err != nil {
+			return false, "", err
+		}
+		logEvent(db, "planner-waits", w.Name, map[string]any{"refinement_runs": n, "at_most": w.Planner.RefineWait.String()})
+	}
+	return true, fmt.Sprintf("%d refinement run(s) of %s are queued or going; it waits for them at most %s", n, w.Name, w.Planner.RefineWait), nil
+}
+
+// endWaits starts the planners that waited for refinement and need not any
+// more: it is done, or it took longer than refine_wait. The wait is over
+// either way, whether or not a planner can start now.
+func endWaits(db *DB, cfg *Config, dry bool) {
+	var names []string
+	for n := range cfg.Workspaces {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if err := endWait(db, cfg, cfg.Workspaces[name], dry); err != nil {
+			note("could not start a planner for %s: %v", name, err)
+		}
+	}
+}
+
+func endWait(db *DB, cfg *Config, w *Workspace, dry bool) error {
+	since, waiting := waitingSince(db, w.Name)
+	if !waiting {
+		return nil
+	}
+	n, err := refining(db, w.Name)
+	if err != nil {
+		return err
+	}
+	if n > 0 && now().Sub(since) < w.Planner.RefineWait {
+		return nil
+	}
+	err = planWorkspace(db, cfg, w, planAfterDone, dry)
+	if err == nil && !dry {
+		db.Exec(`DELETE FROM meta WHERE key = ?`, waitKey(w.Name))
+	}
+	return err
 }
 
 // noRoom is whether the sessions running and queued already fill the

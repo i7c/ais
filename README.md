@@ -230,7 +230,8 @@ know. Each session lists what can be done with it (`can_restart`,
 
 0. **Refinement.** Every five minutes (at most every `refine.sweep`), each
    ticket that turned plannable is refined by a headless run before any
-   planner sees it. The run happens in the background, in no tmux window:
+   planner sees it. The run happens in the background, in no tmux window (under
+   systemd, as a unit `ais-flow-run-<proposal>`):
    `ais runs --kind headless` lists them, `ais log ID` shows what one said. A ticket that says enough to plan from (L2/L3) stays
    `ready`. One that doesn't (L1) gets the evidence found and its questions
    written into a block at the end of its body, and moves to `refinement`.
@@ -294,6 +295,7 @@ iac = "~/git/gpwsoi/infra-workloads"
 schedule = "Mon..Fri *-*-* 08..20:00:00"   # systemd OnCalendar
 idle_timeout = "48h"     # close a planner after this long without your input
 min_interval = "2h"      # least time between two timer-started planners
+refine_wait = "30m"      # longest wait for refinement runs before planning ("0s": none)
 close_after = "5m"       # close a decided planner's window after this long
 
 [workspace.soi.session]            # dispatched work sessions
@@ -337,10 +339,13 @@ The timer starts a planner only when all of these hold:
 - something is plannable;
 - running and queued work sessions plus open planners are below `wip`;
 - no planner is open;
+- no refinement run of the workspace is queued or going, or a planner has
+  already waited `refine_wait` for them;
 - `min_interval` has passed since the last planner started.
 
-`ais flow done` starts one right away if a slot became free, without waiting
-for `min_interval`. `ais flow plan <ws>` run by hand only needs something
+`ais flow done`, and a refinement run that lets its ticket through, start one
+right away under the same checks, without waiting for `min_interval`. A planner
+held back by refinement opens when the last run ends, whatever its outcome. `ais flow plan <ws>` run by hand only needs something
 plannable.
 
 ### Commands

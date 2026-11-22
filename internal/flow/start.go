@@ -178,6 +178,9 @@ func finishRefine(cfg *Config, w *Workspace, p *Proposal, code int) {
 		if err := planWorkspace(db, cfg, w, planAfterDone, false); err != nil {
 			note("could not start a planner: %v", err)
 		}
+	} else if err := endWait(db, cfg, w, false); err != nil {
+		// One may be waiting for this run, whatever came of it.
+		note("could not start a planner: %v", err)
 	}
 }
 

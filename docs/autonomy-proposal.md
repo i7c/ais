@@ -588,10 +588,17 @@ These came up while building, and changed the design above:
   counts open planners now), not the workspace's, and have their own
   `refine.wip` (1).
 - **Refine runs are headless** (*2026-11-21*): the dispatcher starts them as
-  detached `ais run --headless` processes, not in a tmux window. `ais runs`,
+  detached `ais run --headless` processes, not in a tmux window. Under systemd
+  each is a transient unit of its own, because what a one-shot service leaves
+  behind is killed when it ends. `ais runs`,
   `ais log` and `ais stats` are where you see them.
-- **A refine run's tickets don't block a planner** from opening. They are
-  simply not plannable until they are assessed.
+- **A planner waits for refinement** before opening by itself, for at most
+  `planner.refine_wait` (30m), *changed 2026-11-22*. At first a refine run's
+  tickets didn't hold a planner back, but a planner lists the tickets once and
+  then waits for me, so one that opened after the first of four runs proposed
+  one session and missed the tickets the others let through. The wait is
+  counted once, from its start, so a run that hangs can't block planning. A
+  planner started by hand doesn't wait.
 - **The refinement status is optional per board.** If the board has no option
   named `refine.status` (default `refinement`), the sweep logs that and skips
   the workspace. It never fails the dispatch tick.
