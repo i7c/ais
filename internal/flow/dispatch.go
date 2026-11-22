@@ -7,9 +7,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/i7c/ais/internal/ais"
 )
@@ -335,36 +337,100 @@ func (d *dispatcher) start(p *Proposal, manual bool) error {
 	return nil
 }
 
-// spawnDetached runs "ais flow start <id>" in the background: its own
-// session, no terminal and no pane, so it survives the dispatcher and shows
-// up nowhere on screen. TMUX stays: it names the server, which a planner the
-// run opens when it ends must use; only the pane it would claim goes. What flow itself says about the run goes to
-// logs/flow-<id>.log; what the harness says, to the session's own log.
+// spawnDetached runs "ais flow start <id>" in the background: no terminal
+// and no pane, so it shows up nowhere on screen. What flow itself says about
+// the run goes to logs/flow-<id>.log; what the harness says, to the session's
+// own log.
+//
+// Under systemd the run is a unit of its own. The dispatcher is usually a
+// one-shot service, and when that ends systemd kills everything left in its
+// control group, which a new session (setsid) does not leave. Without a
+// systemd user manager a new session is enough.
 func spawnDetached(id string) error {
 	path := filepath.Join(homeDir(), "logs", "flow-"+id+".log")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
+	}
+	argv := []string{ais.Self(), "flow", "start", id}
+	env := detachedEnv(os.Environ())
+	if systemdUser() {
+		return spawnUnit("ais-flow-run-"+id, path, env, argv)
 	}
 	out, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return err
 	}
 	defer out.Close()
-	cmd := exec.Command(ais.Self(), "flow", "start", id)
+	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Dir = home()
 	cmd.Stdout, cmd.Stderr = out, out
-	var env []string
-	for _, kv := range os.Environ() {
-		if k, _, _ := strings.Cut(kv, "="); k != "TMUX_PANE" {
-			env = append(env, kv)
-		}
-	}
 	cmd.Env = env
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
 		return err
 	}
 	return cmd.Process.Release()
+}
+
+// systemdUser is whether there is a systemd user manager to start units.
+func systemdUser() bool {
+	dir := os.Getenv("XDG_RUNTIME_DIR")
+	if dir == "" {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, "systemd", "private")); err != nil {
+		return false
+	}
+	_, err := exec.LookPath("systemd-run")
+	return err == nil
+}
+
+// spawnUnit starts argv as a transient user unit, returning once it has been
+// executed (Type=exec), so a start that fails is an error here.
+func spawnUnit(name, log string, env, argv []string) error {
+	args := []string{"--user", "--collect", "--quiet", "--unit=" + name, "--working-directory=" + home(),
+		"-p", "Type=exec", "-p", "StandardOutput=append:" + log, "-p", "StandardError=append:" + log}
+	for _, kv := range env {
+		// By name only: the value comes from cmd.Env, not from argv, where
+		// every user of the machine could read it.
+		k, v, _ := strings.Cut(kv, "=")
+		if unitEnv(k, v) {
+			args = append(args, "--setenv="+k)
+		}
+	}
+	cmd := exec.Command("systemd-run", append(append(args, "--"), argv...)...)
+	cmd.Env = env
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("systemd-run: %s", orDefault(strings.TrimSpace(string(out)), err.Error()))
+	}
+	return nil
+}
+
+var envName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// unitEnv is whether systemd takes the variable: it refuses the whole unit
+// over a name or value it does not like (exported bash functions, say).
+func unitEnv(k, v string) bool {
+	return envName.MatchString(k) && utf8.ValidString(v) &&
+		!strings.ContainsFunc(v, func(r rune) bool { return (r < ' ' && r != '\t' && r != '\n') || r == 0x7f })
+}
+
+// detachedEnv is the dispatcher's environment without what is only true of
+// the dispatcher: the pane it was typed in, and the service systemd runs it
+// as. TMUX stays: it names the server, which a planner the run opens when it
+// ends must use.
+func detachedEnv(environ []string) []string {
+	var out []string
+	for _, kv := range environ {
+		switch k, _, _ := strings.Cut(kv, "="); k {
+		case "TMUX_PANE", "INVOCATION_ID", "JOURNAL_STREAM", "NOTIFY_SOCKET", "SYSTEMD_EXEC_PID",
+			"MAINPID", "MANAGERPID", "MANAGERPIDFDID", "MEMORY_PRESSURE_WATCH", "MEMORY_PRESSURE_WRITE",
+			"LISTEN_PID", "LISTEN_FDS", "LISTEN_FDNAMES":
+		default:
+			out = append(out, kv)
+		}
+	}
+	return out
 }
 
 // checkTrust refuses to start claude where its folder-trust dialog would
