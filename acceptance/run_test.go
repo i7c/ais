@@ -233,3 +233,58 @@ func TestReapAfterHardKill(t *testing.T) {
 		t.Errorf("sessions.json version = %v, want 1", raw["version"])
 	}
 }
+
+func TestRunInAnotherTmuxSession(t *testing.T) {
+	l := NewLab(t)
+	dir := filepath.Join(l.Dir, "elsewhere")
+	l.WriteFile(filepath.Join(dir, "prompt.txt"), "from a file\n")
+
+	sessionIn := func(name string, skip map[string]bool) string {
+		var id string
+		l.Eventually("a session in tmux session "+name, func() bool {
+			for _, s := range l.State().Sessions {
+				if s.Tmux.SessionName == name && s.Status == "active" && !skip[s.ID] {
+					id = s.ID
+				}
+			}
+			return id != "" && fileExists(filepath.Join(l.Log, id, "ready"))
+		})
+		return id
+	}
+
+	_, exitFile := l.Window(dir, l.AisCommand("run", "fake", "--tmux-session", "other", "-d", "Elsewhere",
+		"--prompt-file", "prompt.txt", "--", "--model", "x"))
+	l.Eventually("the launching ais returns", func() bool { return fileExists(exitFile) })
+	if code := strings.TrimSpace(l.ReadFile(exitFile)); code != "0" {
+		t.Fatalf("launching ais exited %s", code)
+	}
+	first := sessionIn("other", nil)
+	got := l.Session(first)
+	if got.Cwd != dir || got.Description != "Elsewhere" || strings.Join(got.Args, " ") != "--model x" {
+		t.Errorf("recorded %+v", got)
+	}
+	f := l.Fake(first)
+	if f.Cwd != dir || f.Prompt() != "from a file" || !contains(f.Argv, "--model") {
+		t.Errorf("fake started with cwd %q argv %q", f.Cwd, f.Argv)
+	}
+
+	_, exitFile = l.Window(dir, l.AisCommand("run", "fake", "--tmux-session", "other", "-d", "Second", "--prompt", "hi"))
+	l.Eventually("the second launching ais returns", func() bool { return fileExists(exitFile) })
+	second := sessionIn("other", map[string]bool{first: true})
+	if p := l.Fake(second).Prompt(); p != "hi" {
+		t.Errorf("second prompt = %q", p)
+	}
+	if n := len(lines(l.tmuxMust("list-windows", "-t", "=other", "-F", "#{window_id}"))); n != 2 {
+		t.Errorf("tmux session other has %d windows, want 2", n)
+	}
+
+	here := []string{"TMUX_PANE=" + l.HerePane()}
+	for name, args := range map[string][]string{
+		"headless":            {"run", "fake", "--tmux-session", "other", "--headless", "--prompt", "x"},
+		"window, not session": {"run", "fake", "--tmux-session", "other:1"},
+	} {
+		if r := l.Ais(here, args...); r.Code == 0 {
+			t.Errorf("%s: succeeded", name)
+		}
+	}
+}

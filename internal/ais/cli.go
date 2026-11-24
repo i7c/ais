@@ -189,6 +189,7 @@ func startSession(aisArgs, harnessArgv []string) int {
 		{names: []string{"--batch"}, kind: flagOpt},
 		{names: []string{"--headless"}, kind: flagOpt},
 		{names: []string{"--repos"}, kind: listOpt},
+		{names: []string{"--tmux-session"}, kind: valueOpt},
 	}, worktreeOpts...), true)
 	if p.flags["-h"] {
 		fmt.Print(usage())
@@ -210,6 +211,7 @@ func startSession(aisArgs, harnessArgv []string) int {
 		PromptFile:  p.values["--prompt-file"],
 		Batch:       p.flags["--batch"] || p.flags["--headless"],
 		Headless:    p.flags["--headless"],
+		TmuxSession: p.values["--tmux-session"],
 	}
 	for _, list := range p.lists["--repos"] {
 		for _, repo := range strings.Split(list, ",") {
@@ -235,6 +237,12 @@ func startSession(aisArgs, harnessArgv []string) int {
 	}
 	if len(harnessArgv) == 0 && a.Fork == "" {
 		die("name the profile to start, e.g. %s run claude", prog)
+	}
+	if a.TmuxSession != "" {
+		if a.Headless {
+			die("--headless runs without a pane; --tmux-session has no window to open for it")
+		}
+		return startInTmuxSession(a, harnessArgv)
 	}
 	return cmdRun(a, harnessArgv)
 }

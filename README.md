@@ -60,6 +60,7 @@ ais run claude -d "fix the auth bug"
 ais run claude -w -d "fix the auth bug"                  # in a git worktree
 ais run claude -d "auth" --repos ~/git/backend,~/git/iac # one worktree per repo
 ais run claude --prompt "/work-tickets <issue url>"      # with a first message
+ais run claude --tmux-session work --prompt "fix #12"    # in a new window of tmux session "work"
 ais run pi -d "port the parser" -- --thinking high       # args after -- go to the harness
 ais -d "port the parser" -- pi --thinking high           # short form of the line above
 ```
@@ -87,6 +88,7 @@ its refinement runs this way.
 | `--batch` | run the prompt to its end and exit, no conversation (the profile's `batch` template, `-p` for claude and pi) |
 | `--headless` | `--batch` with no tmux pane or terminal; output to `~/.ais/logs/<id>.log` |
 | `--cwd DIR` | start in DIR |
+| `--tmux-session NAME` | start in a new, unfocused window of tmux session NAME (made if missing) rather than this pane; prints the pane id |
 | `--fork ID` | a second session beside ID: same profile, directory and worktree, conversation forked |
 | `-n, --dry-run` | print the command and environment, run nothing |
 

@@ -26,6 +26,7 @@ type runArgs struct {
 	Batch       bool     // --batch: no conversation, the prompt run to its end
 	Headless    bool     // --headless: --batch with no tmux pane, output to a log
 	Repos       []string // --repos: a worktree of each, side by side
+	TmuxSession string
 }
 
 // wtRequest is acted on by launch once the session has an id and a name to
@@ -175,6 +176,80 @@ func cmdRun(a runArgs, harnessArgv []string) int {
 		want = &wtRequest{Root: root, Repo: repoName(root), From: a.From, Detach: a.Detach}
 	}
 	return launch(r, argv, st, want, a.DryRun)
+}
+
+func startInTmuxSession(a runArgs, harnessArgv []string) int {
+	if !haveTmux() {
+		die("tmux not found on PATH")
+	}
+	session := a.TmuxSession
+	if strings.ContainsAny(session, ":.") {
+		die("--tmux-session takes a tmux session name, not a window or pane: %s", pyRepr(session))
+	}
+	cwd := runDirectory(a)
+	argv := []string{self(), "run"}
+	if len(harnessArgv) > 0 {
+		argv = append(argv, harnessArgv[0])
+	}
+	if a.Description != nil {
+		argv = append(argv, "--description", *a.Description)
+	}
+	if a.Worktree != nil {
+		argv = append(argv, map[bool]string{true: "--worktree", false: "--no-worktree"}[*a.Worktree])
+	}
+	if a.From != "" {
+		argv = append(argv, "--from", a.From)
+	}
+	if a.Detach != nil {
+		argv = append(argv, map[bool]string{true: "--detach", false: "--no-detach"}[*a.Detach])
+	}
+	argv = append(argv, "--cwd", cwd)
+	if a.Fork != "" {
+		argv = append(argv, "--fork", a.Fork)
+	}
+	if a.PromptFile != "" && a.PromptFile != "-" {
+		path, err := filepath.Abs(expandUser(a.PromptFile))
+		must(err)
+		argv = append(argv, "--prompt-file", path)
+	} else if a.Prompt != nil || a.PromptFile == "-" {
+		argv = append(argv, "--prompt", firstPrompt(a))
+	}
+	if a.Batch {
+		argv = append(argv, "--batch")
+	}
+	for _, repo := range a.Repos {
+		path, err := filepath.Abs(expandUser(repo))
+		must(err)
+		argv = append(argv, "--repos", path)
+	}
+	if len(harnessArgv) > 1 {
+		argv = append(append(argv, "--"), harnessArgv[1:]...)
+	}
+
+	exists := tmux("has-session", "-t", "="+session).ok()
+	var cmd []string
+	if exists {
+		cmd = []string{"new-window", "-d", "-t", "=" + session + ":"}
+	} else {
+		cmd = []string{"new-session", "-d", "-s", session}
+	}
+	cmd = append(cmd, "-c", cwd, "-P", "-F", "#{session_name}:#{window_index} #{pane_id}", "--")
+	cmd = append(cmd, argv...)
+	if a.DryRun {
+		fmt.Println("tmux:   ", shellJoin(append([]string{"tmux"}, cmd...)))
+		return 0
+	}
+	res := tmux(cmd...)
+	if !res.ok() {
+		die("could not open a window in tmux session %s: %s", session, strings.TrimSpace(res.Stderr))
+	}
+	where, pane, _ := strings.Cut(strings.TrimSpace(res.Stdout), " ")
+	if !exists {
+		note("made tmux session %s", session)
+	}
+	note("started in %s", where)
+	fmt.Println(pane)
+	return 0
 }
 
 func nonNil(id string) []string {
