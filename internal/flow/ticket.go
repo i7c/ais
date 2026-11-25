@@ -20,6 +20,9 @@ const ticketUsage = `usage: ais flow ticket <command> REF [options]
                      post a comment (a hand-off, a result)
   close REF (--done | --not-planned) [--comment TEXT]
                      close it with its evidence, or abandon it
+  defer REF [--comment TEXT | --comment-file F]
+                     not now: it stays open and goes back to the board's
+                     backlog status, from where it can be made ready again
   new --title T (--body TEXT | --body-file F) [--parent REF] [--repo O/N]
       [--blocked-by REF,...] [--type T]
                      create a ticket (a follow-up: give its parent); prints
@@ -69,6 +72,8 @@ func cmdTicket(args []string) error {
 		return cmdTicketComment(rest)
 	case "close":
 		return cmdTicketClose(rest)
+	case "defer":
+		return cmdTicketDefer(rest)
 	case "new", "create":
 		return cmdTicketNew(rest)
 	case "assess":
@@ -76,7 +81,7 @@ func cmdTicket(args []string) error {
 	case "refine":
 		return cmdTicketRefine(rest)
 	}
-	return usagef("unknown ticket command %q; try show, comment, close, new, assess, refine", sub)
+	return usagef("unknown ticket command %q; try show, comment, close, defer, new, assess, refine", sub)
 }
 
 // ticketCmd is what every ticket command starts from.
@@ -343,6 +348,57 @@ func cmdTicketClose(args []string) error {
 	}
 	logEvent(t.db, "ticket-closed", t.url, how)
 	note("closed %s as %s", shortTickets([]string{t.url}), how)
+	return nil
+}
+
+// cmdTicketDefer takes a ticket off the work for now. It is not closed: a
+// closed ticket is never plannable again, and this one is meant to be.
+func cmdTicketDefer(args []string) error {
+	o, err := parseOpts(args, []string{"--ws", "--comment", "--comment-file"}, nil, map[string]string{"-w": "--ws"})
+	if err != nil {
+		return err
+	}
+	comment, _, err := o.text("--comment")
+	if err != nil {
+		return err
+	}
+	t, err := openTicketCmd(o, true)
+	if err != nil {
+		return err
+	}
+	defer t.close()
+	if t.w == nil {
+		return fmt.Errorf("defer moves a ticket on a workspace's board; name the workspace with --ws")
+	}
+	is, err := t.src.Issue(t.url)
+	if err != nil {
+		return err
+	}
+	if is.State != "OPEN" {
+		return fmt.Errorf("%s is %s; reopen it first if it should come back", shortTickets([]string{t.url}), strings.ToLower(is.State))
+	}
+	items, err := t.src.Find([]string{t.url})
+	if err != nil {
+		return err
+	}
+	backlog := t.w.Source.Backlog
+	if err := t.src.SetStatus(items, backlog); err != nil {
+		return err
+	}
+	logEvent(t.db, "ticket-deferred", t.url, elide(comment, 80))
+	note("%s is back in %q", shortTickets([]string{t.url}), backlog)
+	if strings.TrimSpace(comment) != "" {
+		if err := t.src.Comment(t.url, comment); err != nil {
+			return fmt.Errorf("moved to %q, but the comment was not posted: %w", backlog, err)
+		}
+	}
+	if held, err := proposals(t.db, activeStates); err == nil {
+		for _, p := range held {
+			if contains(p.Tickets, t.url) {
+				note("%s still holds it (%s): ais flow cancel %s, or queue cancel if it is only queued", p.ID, p.State, p.ID)
+			}
+		}
+	}
 	return nil
 }
 

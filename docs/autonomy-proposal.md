@@ -264,6 +264,7 @@ by GitHub:
 | `ticket assess <ref> --level L2\|L3 --file -` | Record the assessment and write the block (§5.2). |
 | `ticket refine <ref> --file -` | Write the L1 block and move the ticket to `refinement`. |
 | `ticket close <ref> --done\|--not-planned --comment …` | Close a ticket with its evidence, or abandon it. |
+| `ticket defer <ref> [--comment …]` | Not now: the ticket stays open and moves to the backlog status, from where it can be made ready again. |
 | `ticket new --parent <ref> --title … --file -` | Create a follow-up sub-issue, with optional `--blocked-by`. |
 | `ticket plan <ref> --url <pr>` | Link the plan PR on the ticket (§8). |
 

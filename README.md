@@ -287,6 +287,7 @@ field = "Status"
 ready = "ready"
 scheduled = "scheduled"
 in_progress = "In Progress"
+backlog = "Todo"         # where ticket defer and flow cancel put tickets
 comment = true           # comment on a ticket when it is scheduled
 
 [workspace.soi.repos]    # the repos sessions may use, by short name

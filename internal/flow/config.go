@@ -38,7 +38,8 @@ type SourceConf struct {
 	Ready      string
 	Scheduled  string
 	InProgress string
-	Comment    bool // leave a short comment on a ticket when it is scheduled
+	Backlog    string // where a deferred or cancelled ticket goes: not ready, still open
+	Comment    bool   // leave a short comment on a ticket when it is scheduled
 }
 
 // RoleConf is how a role's prompt is made: the built-in one, with
@@ -183,6 +184,7 @@ func parseConfig(raw map[string]any) (*Config, error) {
 			Ready:      r.str(src, "ready", where+".source.ready", "ready"),
 			Scheduled:  r.str(src, "scheduled", where+".source.scheduled", "scheduled"),
 			InProgress: r.str(src, "in_progress", where+".source.in_progress", "In Progress"),
+			Backlog:    r.str(src, "backlog", where+".source.backlog", "Todo"),
 			Comment:    r.boolean(src, "comment", where+".source.comment", true),
 		}
 		if w.Source.Kind != "github-project" {
