@@ -53,6 +53,10 @@ Planned and dispatched sessions: see docs/flow-proposal.md.
                                ID is a proposal or session; default: this one.
                                Refuses while review check finds a plan left
                                on its branches (--force: anyway)
+  cancel [ID] [--reason TEXT]  the session's work is dropped, not finished:
+                               frees its slot, moves its tickets to the
+                               backlog status (open, to be made ready again),
+                               and closes a plan-only PR and its branch
   ticket <cmd> REF ...         the task layer, for agents and you: show,
                                comment, close, new, assess, refine;
                                ais flow ticket --help
@@ -141,6 +145,8 @@ func run(args []string) error {
 		return cmdDispatch(rest)
 	case "done":
 		return cmdDone(rest)
+	case "cancel":
+		return cmdCancel(rest)
 	case "install":
 		return cmdInstall(rest)
 	case "limit", "limits":

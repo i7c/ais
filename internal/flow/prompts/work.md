@@ -251,6 +251,12 @@ first line, not at the end.
 Then suggest what should come next, without starting it. Run `ais flow done`
 only when the user says the session is finished. It frees the session's slot,
 and refuses while `ais flow review check` fails.
+
+If the user drops the work instead (not now, not this way), do not use
+`done`. Leave the hand-off, then, when they say so, run
+`ais flow cancel --reason "<why>"`: the tickets go back to the backlog, still
+open, and a branch that holds only the plan is closed and cleared, so a later
+session starts clean.
 {{- end}}
 
 ## Notify when you stop

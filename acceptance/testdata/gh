@@ -161,6 +161,13 @@ elif args[:2] in (["pr", "edit"], ["pr", "ready"]):
             else:
                 pr["isDraft"] = False
     jsave("prs.json", prs)
+elif args[:2] == ["pr", "close"]:
+    prs = jload("prs.json", {})
+    for pr in prs.values():
+        if pr["url"] == args[2]:
+            pr["state"] = "CLOSED"
+            pr["closeComment"] = opt("--comment")
+    jsave("prs.json", prs)
 elif args[:2] == ["repo", "view"]:
     print("gpwsoi/backend")
 elif args[:2] == ["issue", "comment"]:

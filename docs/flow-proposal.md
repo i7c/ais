@@ -168,6 +168,7 @@ All under `ais flow`, all one-shot. `--json` on every read.
 | `ais flow dispatch --now <id>` | me | Start one proposal now, past WIP and rate limits (still logged and counted). |
 | `ais flow start <id>` | the new tmux pane | Make worktrees, set `In Progress`, exec the harness through ais. Internal. |
 | `ais flow done [<ais id>]` | me, or the agent when I say so | Mark the run done; frees the slot. Defaults to the current session. |
+| `ais flow cancel [<ais id>] [--reason …]` | me, or the agent when I say so | The work is dropped, not finished: mark the run `cancelled`, free the slot, move its tickets to the backlog status, close a plan-only PR and clear its branch. |
 | `ais flow limit <key> <value> [--until eod\|HH:MM\|<date> \| --for 3h]` | me | Override `wip`, `per_hour` or `per_day` until the given time; the default is the end of the day. `ais flow limit` alone shows the effective limits and where each comes from; `--clear` drops overrides. |
 | `ais flow ls` | me | Planners, queue, running, done-today, limits used. |
 | `ais flow log` | me | The events table, newest first. |

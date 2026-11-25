@@ -255,10 +255,15 @@ know. Each session lists what can be done with it (`can_restart`,
    drops the plan commits and marks the PR ready.
 5. **Done.** `ais flow done`, run by you or by the agent when you tell it to,
    frees the session's slot. It refuses while a plan is left on the
-   session's branches.
+   session's branches. `ais flow cancel [--reason …]` is the other way out,
+   for work that is dropped rather than finished: the slot is freed as
+   `cancelled`, the tickets go back to the backlog status (`source.backlog`,
+   default `Todo`), and a branch holding only the plan has its PR closed and
+   is cleared, so the tickets can be made ready again later and planned
+   afresh.
 
 Agents reach tickets only through `ais flow ticket` (show, comment, close,
-new, assess, refine), never through `gh`. The prompts every role starts with
+defer, new, assess, refine), never through `gh`. The prompts every role starts with
 are built into ais, so no skill has to be installed. `ais flow prompt show
 planner|work|refine` prints them.
 
