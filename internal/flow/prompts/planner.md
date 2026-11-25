@@ -147,7 +147,14 @@ It prints the proposal id; use it in `--after` for the ones that follow.
 - **Starting:** don't run `ais flow dispatch`. If the user explicitly asks for
   one to start right away, `ais flow dispatch --now <id>` does it.
 - **What wasn't accepted** stays ready and comes back to the next planner.
-  There is no "not now" and no deferring: don't move those tickets anywhere.
+  Don't move those tickets anywhere on your own.
+- **Not now.** Only if the user asks to take a ticket out of ready for a
+  while, defer it with their reason. It stays open and goes to the backlog,
+  and comes back once they mark it ready again:
+
+  ```sh
+  ais flow ticket defer <ref> --comment "<one line why>"
+  ```
 - **Abandoning.** If they ask to abandon tickets (no longer relevant), close
   each one with their reason:
 
@@ -164,7 +171,7 @@ ais flow plan done
 Then reply with:
 
 - what was queued (id, title, tickets, level);
-- what was abandoned;
+- what was abandoned, and what was deferred;
 - that the rest stays ready.
 
 The window closes on its own a few minutes after you stop typing. If the user

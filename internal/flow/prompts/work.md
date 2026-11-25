@@ -31,7 +31,21 @@ approved a plan.**
 
 Reach tickets **only through `ais flow ticket`**, never through `gh issue` or
 `gh project`. Git and pull requests are the code host, not the task layer:
-`git` and `gh pr` are fine.
+`git` and `gh pr` are fine. The ticket commands (`ais flow ticket --help` has
+the options):
+
+| command | for |
+|---|---|
+| `ticket show <ref> [--context]` | reading a ticket and, with `--context`, its chain |
+| `ticket comment <ref> --body-file -` | hand-offs, results, recorded decisions |
+| `ticket new --parent <ref> …` | follow-ups for out-of-scope work |
+| `ticket refine <ref> --file -` | sending an L1 ticket back to its author |
+| `ticket close <ref> --done\|--not-planned` | closing with evidence, or abandoning |
+| `ticket defer <ref> [--comment …]` | "not now": open, back to the backlog |
+
+There is no command to set any other status, or to change a ticket's parent
+or blockers. If the user wants that, say it is theirs to do on the board;
+don't reach for `gh` instead.
 
 ## 1. Read the context, up the whole chain
 
@@ -256,7 +270,8 @@ If the user drops the work instead (not now, not this way), do not use
 `done`. Leave the hand-off, then, when they say so, run
 `ais flow cancel --reason "<why>"`: the tickets go back to the backlog, still
 open, and a branch that holds only the plan is closed and cleared, so a later
-session starts clean.
+session starts clean. If only one of several tickets is put off and the rest
+go on, `ais flow ticket defer <ref> --comment "<why>"` moves just that one.
 {{- end}}
 
 ## Notify when you stop

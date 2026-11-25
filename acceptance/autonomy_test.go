@@ -432,6 +432,11 @@ func TestFlowPrompts(t *testing.T) {
 		"\n[workspace.soi.session]\ninstructions = \"Prefer small PRs.\"\n\n[workspace.soi.planner]\nprompt_file = \"" + repl + "\"\n")
 
 	work := l.MustFlow("prompt", "show", "work", "--tickets", "gpwsoi/backend#12").Stdout
+	for _, cmd := range []string{"ticket show", "ticket comment", "ticket new", "ticket refine", "ticket close", "ticket defer"} {
+		if !strings.Contains(work, cmd) {
+			t.Errorf("the work prompt does not mention %q", cmd)
+		}
+	}
 	for _, part := range []string{"# Work on gpwsoi/backend#12", "## Instructions for this workspace", "ADRs go to gpwsoi/adr.",
 		"Prefer small PRs.", "| R7 | Risk |"} {
 		if !strings.Contains(work, part) {
@@ -446,7 +451,7 @@ func TestFlowPrompts(t *testing.T) {
 	if strings.TrimSpace(r.Stdout) != "Plan soi my way." || !strings.Contains(r.Stderr, "built-in one is v1") {
 		t.Errorf("replaced planner prompt:\n%s", r)
 	}
-	if b := l.MustFlow("prompt", "show", "planner", "--builtin").Stdout; !strings.HasPrefix(b, "<!-- ais-prompt: planner v1 -->") {
+	if b := l.MustFlow("prompt", "show", "planner", "--builtin").Stdout; !strings.HasPrefix(b, "<!-- ais-prompt: planner v1 -->") || !strings.Contains(b, "ais flow ticket defer") {
 		t.Errorf("--builtin:\n%s", b)
 	}
 }
